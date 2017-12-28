@@ -11,8 +11,8 @@ typedef struct {
 } DotKillData;
 
 template<typename T>
-static T clamp(T v, T lower, T upper) {
-    return std::max(std::min(v, upper), lower);
+static T clamp(T v, T x, T y) {
+    return std::max(std::min(x, y), v);
 }
 
 static void VS_CC dotKillInit(VSMap *in, VSMap *out, void **instanceData, VSNode *node, VSCore *core, const VSAPI *vsapi) {
@@ -124,6 +124,7 @@ static const VSFrameRef *VS_CC dotKillGetFrame(int n, int activationReason, void
 
         int err = 0;
         int64_t match = vsapi->propGetInt(vsapi->getFramePropsRO(inframe), "VFMMatch", 0, &err);
+        vsapi->freeFrame(inframe);
         bool isC = (d->ignoreMatch || err || match == 1);
      
         int width = d->vi->width;
