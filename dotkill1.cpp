@@ -2,6 +2,7 @@
 #include "VSHelper.h"
 #include <algorithm>
 #include <memory>
+#include <cstdlib>
 
 typedef struct {
     VSNodeRef *node;
