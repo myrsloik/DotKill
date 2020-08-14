@@ -185,9 +185,6 @@ static void VS_CC dotKillSCreate(const VSMap *in, VSMap *out, void *userData, VS
 constexpr int blockx = 16;
 constexpr int blocky = 8;
 
-// fixme, have a scene change ratio that's configurable
-// if more than 3/4 of the blocks change then don't do temporal filtering at all
-
 static void calcDiffMetric(const VSFrameRef *f1, const VSFrameRef *f2, int64_t *bdiffs, int nxblocks, int nyblocks,int field, const VSAPI *vsapi) {
     for (int plane = 0; plane < 3; plane++) {
         ptrdiff_t stride = vsapi->getStride(f1, plane);
@@ -239,8 +236,7 @@ static int64_t getMaxDiff(int i, int j, const int64_t *bdiffs1, int nxblocks, in
     return std::max({ tmp1, tmp2, tmp3, tmp4 });
 }
 
-static void diffMetricToMask(uint8_t *mask, const int64_t *bdiffs1, const int64_t *bdiffs2, int nxblocks, int nyblocks, int dupthresh, const VSAPI *vsapi) {
-    // fixme, must fill in edge blocks
+static void diffMetricToMask(uint8_t *mask, const int64_t *bdiffs1, const int64_t *bdiffs2, int nxblocks, int nyblocks, int dupthresh, int tratio, const VSAPI *vsapi) {
     int totdiff1 = 0;
     int totdiff2 = 0;
 
@@ -256,9 +252,9 @@ static void diffMetricToMask(uint8_t *mask, const int64_t *bdiffs1, const int64_
         }
     }
 
-    // 1/3 of the blocks are different = no temporal processing since it's most likely a pan that covers most of the screen
-    bool skip1 = (totdiff1 * 3 > nxblocks * nyblocks);
-    bool skip2 = (totdiff2 * 3 > nxblocks * nyblocks);
+    // skip temporal processing if more than 1/tratio blocks have changed
+    bool skip1 = (totdiff1 * tratio > (nxblocks - 2) * (nyblocks - 2));
+    bool skip2 = (totdiff2 * tratio > (nxblocks - 2) * (nyblocks - 2));
 
     for (int i = 1; i < nyblocks - 1; i++) {
         for (int j = 1; j < nxblocks - 1; j++) {
@@ -326,7 +322,6 @@ static int64_t calcMetric(const VSFrameRef *f1, const VSFrameRef *f2, uint8_t *m
         }
     }
 
-    // fixme, edge blocks are unset
     for (int i = 1; i < nyblocks - 1; i++) {
         for (int j = 1; j < nxblocks - 1; j++) {
             int64_t tmp1 = bdiffs[i * nxblocks + j] + bdiffs[i * nxblocks + j + 1] + bdiffs[(i + 1) * nxblocks + j] + bdiffs[(i + 1) * nxblocks + j + 1];
@@ -565,6 +560,7 @@ typedef struct {
     int order;
     int offset;
     int dupthresh;
+    int tratio;
 } DotKillTData;
 
 
@@ -620,7 +616,7 @@ static const VSFrameRef *VS_CC dotKillTGetFrame(int n, int activationReason, voi
             calcDiffMetric(srcp, srcn, maskprev1.data(), nxblocks, nyblocks, d->order, vsapi);
             calcDiffMetric(srcc, srcnn, masknext1.data(), nxblocks, nyblocks, d->order, vsapi);
 
-            diffMetricToMask(mask.data(), maskprev1.data(), masknext1.data(), nxblocks, nyblocks, d->dupthresh, vsapi);
+            diffMetricToMask(mask.data(), maskprev1.data(), masknext1.data(), nxblocks, nyblocks, d->dupthresh, d->tratio, vsapi);
 
             applyStaticMask2(outframe, srcc, srcp, srcn, mask.data(), nxblocks, nyblocks, !d->order, vsapi);
         } else if ((n + d->offset) % 5 == 1) {
@@ -634,7 +630,7 @@ static const VSFrameRef *VS_CC dotKillTGetFrame(int n, int activationReason, voi
             calcDiffMetric(srcp, srcn, maskprev1.data(), nxblocks, nyblocks, d->order, vsapi);
             calcDiffMetric(srcc, srcnn, masknext1.data(), nxblocks, nyblocks, !d->order, vsapi);
 
-            diffMetricToMask(mask.data(), maskprev1.data(), masknext1.data(), nxblocks, nyblocks, d->dupthresh, vsapi);
+            diffMetricToMask(mask.data(), maskprev1.data(), masknext1.data(), nxblocks, nyblocks, d->dupthresh, d->tratio, vsapi);
 
             applyStaticMask2(outframe, srcc, srcp, srcn, mask.data(), nxblocks, nyblocks, !d->order, vsapi);
         } else if ((n + d->offset) % 5 == 2) {
@@ -645,7 +641,7 @@ static const VSFrameRef *VS_CC dotKillTGetFrame(int n, int activationReason, voi
             calcDiffMetric(srcc, srcpp, maskprev1.data(), nxblocks, nyblocks, d->order, vsapi);
             calcDiffMetric(srcp, srcn, masknext1.data(), nxblocks, nyblocks, !d->order, vsapi);
 
-            diffMetricToMask(mask.data(), maskprev1.data(), masknext1.data(), nxblocks, nyblocks, d->dupthresh, vsapi);
+            diffMetricToMask(mask.data(), maskprev1.data(), masknext1.data(), nxblocks, nyblocks, d->dupthresh, d->tratio, vsapi);
 
             applyStaticMask2(outframe, srcc, srcp, srcn, mask.data(), nxblocks, nyblocks, d->order, vsapi);
 
@@ -662,7 +658,7 @@ static const VSFrameRef *VS_CC dotKillTGetFrame(int n, int activationReason, voi
             calcDiffMetric(srcc, srcpp, maskprev1.data(), nxblocks, nyblocks, !d->order, vsapi);
             calcDiffMetric(srcp, srcn, masknext1.data(), nxblocks, nyblocks, !d->order, vsapi);
 
-            diffMetricToMask(mask.data(), maskprev1.data(), masknext1.data(), nxblocks, nyblocks, d->dupthresh, vsapi);
+            diffMetricToMask(mask.data(), maskprev1.data(), masknext1.data(), nxblocks, nyblocks, d->dupthresh, d->tratio, vsapi);
 
             applyStaticMask2(outframe, srcc, srcp, srcn, mask.data(), nxblocks, nyblocks, d->order, vsapi);
         } else if ((n + d->offset) % 5 == 4) {
@@ -674,7 +670,7 @@ static const VSFrameRef *VS_CC dotKillTGetFrame(int n, int activationReason, voi
                 calcDiffMetric(srcc, srcpp, maskprev1.data(), nxblocks, nyblocks, !d->order, vsapi);
                 calcDiffMetric(srcc, srcnn, masknext1.data(), nxblocks, nyblocks, d->order, vsapi);
 
-                diffMetricToMask(mask.data(), maskprev1.data(), masknext1.data(), nxblocks, nyblocks, d->dupthresh, vsapi);
+                diffMetricToMask(mask.data(), maskprev1.data(), masknext1.data(), nxblocks, nyblocks, d->dupthresh, d->tratio, vsapi);
 
                 applyStaticMask2(outframe, srcc, srcp, srcn, mask.data(), nxblocks, nyblocks, d->order, vsapi);
             }
@@ -687,7 +683,7 @@ static const VSFrameRef *VS_CC dotKillTGetFrame(int n, int activationReason, voi
                 calcDiffMetric(srcpp, srcc, maskprev1.data(), nxblocks, nyblocks, !d->order, vsapi);
                 calcDiffMetric(srcc, srcnn, masknext1.data(), nxblocks, nyblocks, d->order, vsapi);
 
-                diffMetricToMask(mask.data(), maskprev1.data(), masknext1.data(), nxblocks, nyblocks, d->dupthresh, vsapi);
+                diffMetricToMask(mask.data(), maskprev1.data(), masknext1.data(), nxblocks, nyblocks, d->dupthresh, d->tratio, vsapi);
 
                 applyStaticMask2(outframe, srcc, srcp, srcn, mask.data(), nxblocks, nyblocks, !d->order, vsapi);
             }
@@ -729,6 +725,9 @@ static void VS_CC dotKillTCreate(const VSMap *in, VSMap *out, void *userData, VS
     if (err || d->dupthresh < 0)
         d->dupthresh = 64;
     d->dupthresh *= d->dupthresh;
+    d->tratio = int64ToIntS(vsapi->propGetInt(in, "tratio", 0, &err));
+    if (err || d->tratio < 1)
+        d->tratio = 3;
 
     vsapi->createFilter(in, out, "DotKillT", dotKillTInit, dotKillTGetFrame, dotKillTFree, fmParallelRequests, 0, d.release(), core);
 }
@@ -740,5 +739,5 @@ VS_EXTERNAL_API(void) VapourSynthPluginInit(VSConfigPlugin configFunc, VSRegiste
     configFunc("com.vapoursynth.dotkill", "dotkill", "VapourSynth DotKill", VAPOURSYNTH_API_VERSION, 1, plugin);
     registerFunc("DotKillS", "clip:clip;iterations:int:opt;usematch:int:opt;", dotKillSCreate, 0, plugin);
     registerFunc("DotKillZ", "clip:clip;order:int:opt;offset:int:opt;", dotKillZCreate, 0, plugin);
-    registerFunc("DotKillT", "clip:clip;order:int:opt;offset:int:opt;dupthresh:int:opt;", dotKillTCreate, 0, plugin);
+    registerFunc("DotKillT", "clip:clip;order:int:opt;offset:int:opt;dupthresh:int:opt;tratio:int:opt;", dotKillTCreate, 0, plugin);
 }
