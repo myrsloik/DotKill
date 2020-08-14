@@ -47,13 +47,16 @@ dupthresh: The threshold for determining if a block has changed between fields. 
 
 tratio: If more than 1/tratio blocks have changed between fields then temporal filtering won't be considered in that direction. Higher values can make high motion sections less likely to artifact.
 
-show: Shows which blocks have been determined to contain no change between frames and therefore will be blended to reduce artifacts. White square means that it will blend with the next frame and black square the previous. 
+show: Shows which blocks have been determined to contain no change between fields and therefore will be blended to reduce artifacts. White square means that it will blend with the next frame and black square the previous. 
 
 Usage
 =====
 
 clip = core.dotkill.DotKillT(clip, offset=1, dupthresh=64)
+
 clip = core.vivtc.VFM(clip)
+
 clip = core.dotkill.DotKillS(clip, iterations=4)
+
 clip = core.vivtc.VDecimate(clip)
 
