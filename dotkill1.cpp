@@ -5,6 +5,16 @@
 #include <cstdlib>
 #include <vector>
 
+// FIXME, add show argument
+// white box = next temporal
+// black box = previous temporal
+// no box = standard processing
+
+// FIXME, show some more things like offset as well
+
+////////////////////////////////////////
+// DotKillS
+
 typedef struct {
     VSNodeRef *node;
     const VSVideoInfo *vi;
@@ -98,10 +108,10 @@ static void applyMask(const int16_t *maskPtr, uint8_t *dst, int dstStride, int w
             if (std::abs(t) > 1) {
                 ppMask[x] = 255;
 
-                dst[x] = (uint8_t)std::clamp(dst[x] - t, 0, 255);
-                dst[x + 1] = (uint8_t)std::clamp(dst[x + 1] - t, 0, 255);
-                dst[x + dstStride] = (uint8_t)std::clamp(dst[x + dstStride] - sign * t, 0, 255);
-                dst[x + 1 + dstStride] = (uint8_t)std::clamp(dst[x + 1 + dstStride] - sign * t, 0, 255);
+                dst[x] = static_cast<uint8_t>(std::clamp(dst[x] - t, 16, 235));
+                dst[x + 1] = static_cast<uint8_t>(std::clamp(dst[x + 1] - t, 16, 235));
+                dst[x + dstStride] = static_cast<uint8_t>(std::clamp(dst[x + dstStride] - sign * t, 16, 235));
+                dst[x + 1 + dstStride] = static_cast<uint8_t>(std::clamp(dst[x + 1 + dstStride] - sign * t, 16, 235));
             }
         }
 
@@ -180,7 +190,154 @@ static void VS_CC dotKillSCreate(const VSMap *in, VSMap *out, void *userData, VS
 }
 
 
-///////////////////////
+/////////////////////////////////////////////////////////////////////
+// DotKillZ
+
+
+static void applyFieldBlend(const VSFrameRef *srcc, const VSFrameRef *srcn, VSFrameRef *outframe, int order, VSCore *core, const VSAPI *vsapi) {
+    const VSFormat *fi = vsapi->getFrameFormat(srcc);
+    for (int plane = 0; plane < fi->numPlanes; plane++) {
+        int width = vsapi->getFrameWidth(srcc, plane);
+        int height = vsapi->getFrameHeight(srcc, plane);
+
+        int stride = vsapi->getStride(outframe, plane);
+        uint8_t *dstp = vsapi->getWritePtr(outframe, plane);
+        const uint8_t *srccp = vsapi->getReadPtr(srcc, plane);
+        const uint8_t *srcnp = vsapi->getReadPtr(srcn, plane);
+
+        if (order) {
+            srccp += stride;
+            srcnp += stride;
+            dstp += stride;
+        }
+
+        for (int h = order; h < height; h += 2) {
+            for (int w = 0; w < width; w++)
+                dstp[w] = (srccp[w] + srcnp[w] + 1) / 2;
+
+            srccp += 2 * stride;
+            srcnp += 2 * stride;
+            dstp += 2 * stride;
+        }
+    }
+}
+
+static void applyDotcrawInverse(const VSFrameRef *srcc, const VSFrameRef *srcn, VSFrameRef *outframe, int order, VSCore *core, const VSAPI *vsapi) {
+    const VSFormat *fi = vsapi->getFrameFormat(srcc);
+    for (int plane = 0; plane < fi->numPlanes; plane++) {
+        int width = vsapi->getFrameWidth(srcc, plane);
+        int height = vsapi->getFrameHeight(srcc, plane);
+
+        int stride = vsapi->getStride(outframe, plane);
+        uint8_t *dstp = vsapi->getWritePtr(outframe, plane);
+        const uint8_t *srccp = vsapi->getReadPtr(srcc, plane);
+        const uint8_t *srcnp = vsapi->getReadPtr(srcn, plane);
+
+        if (order) {
+            srccp += stride;
+            srcnp += stride;
+            dstp += stride;
+        }
+
+        for (int h = order; h < height; h += 2) {
+            for (int w = 0; w < width; w++) {
+                dstp[w] = (srccp[w] + srcnp[w] + 1) / 2;
+
+                if (h > 1) {
+                    uint8_t l0val = dstp[w - 2 * stride];
+                    uint8_t l2val = dstp[w];
+                    int l0diff = dstp[w - 2 * stride] - srccp[w - 2 * stride];
+                    int l2diff = dstp[w] - srccp[w];
+                    if (plane == 0)
+                        dstp[w - stride] = std::clamp(srccp[w - stride] + (order ? l0diff : l2diff), 16, 235);
+                    else
+                        dstp[w - stride] = (l0val + l2val + 1) / 2; // simply use some kind of interpolation and discard one field?
+                }
+            }
+
+            srccp += 2 * stride;
+            srcnp += 2 * stride;
+            dstp += 2 * stride;
+        }
+    }
+}
+
+typedef struct {
+    VSNodeRef *node;
+    const VSVideoInfo *vi;
+    int order;
+    int offset;
+} DotKillZData;
+
+static void VS_CC dotKillZInit(VSMap *in, VSMap *out, void **instanceData, VSNode *node, VSCore *core, const VSAPI *vsapi) {
+    DotKillZData *d = (DotKillZData *)*instanceData;
+    vsapi->setVideoInfo(d->vi, 1, node);
+}
+
+static const VSFrameRef *VS_CC dotKillZGetFrame(int n, int activationReason, void **instanceData, void **frameData, VSFrameContext *frameCtx, VSCore *core, const VSAPI *vsapi) {
+    DotKillZData *d = (DotKillZData *)*instanceData;
+
+    if (activationReason == arInitial) {
+        vsapi->requestFrameFilter(std::max(n - 1, 0), d->node, frameCtx);
+        vsapi->requestFrameFilter(n, d->node, frameCtx);
+        vsapi->requestFrameFilter(n + 1, d->node, frameCtx);
+    } else if (activationReason == arAllFramesReady) {
+        const VSFrameRef *srcp = vsapi->getFrameFilter(std::max(n - 1, 0), d->node, frameCtx);
+        const VSFrameRef *srcc = vsapi->getFrameFilter(n, d->node, frameCtx);
+        const VSFrameRef *srcn = vsapi->getFrameFilter(n + 1, d->node, frameCtx);
+
+        /*
+            FIELD OFFSETS
+            -1  0  1  2  3
+            A1 B1 B1 C1 D1
+            A2 B2 C2 D2 D2
+        */
+
+        VSFrameRef *outframe = vsapi->copyFrame(srcc, core);
+        if ((n + d->offset) % 5 == 0) {
+            // current and next field are duplicates, complement field is from the same frame so do dotcrawl inverse on that as well
+            applyDotcrawInverse(srcc, srcn, outframe, d->order, core, vsapi);
+        } else if ((n + d->offset) % 5 == 1) {
+            // current and previous field are duplicates so blend them together
+            applyFieldBlend(srcc, srcp, outframe, d->order, core, vsapi);
+        } else if ((n + d->offset) % 5 == 2) {
+            // current and next complement field are duplicates so blend them together
+            applyFieldBlend(srcc, srcn, outframe, !d->order, core, vsapi);
+        } else if ((n + d->offset) % 5 == 3) {
+            // current and previous field are duplicates, complement field is from the same frame so do dotcrawl inverse on that as well
+            applyDotcrawInverse(srcc, srcp, outframe, !d->order, core, vsapi);
+        }
+
+        vsapi->freeFrame(srcp);
+        vsapi->freeFrame(srcc);
+        vsapi->freeFrame(srcn);
+
+        return outframe;
+    }
+
+    return nullptr;
+}
+
+static void VS_CC dotKillZFree(void *instanceData, VSCore *core, const VSAPI *vsapi) {
+    DotKillZData *d = (DotKillZData *)instanceData;
+    vsapi->freeNode(d->node);
+    delete d;
+}
+
+static void VS_CC dotKillZCreate(const VSMap *in, VSMap *out, void *userData, VSCore *core, const VSAPI *vsapi) {
+    std::unique_ptr<DotKillZData> d(new DotKillZData());
+
+    int err;
+    d->node = vsapi->propGetNode(in, "clip", 0, 0);
+    d->vi = vsapi->getVideoInfo(d->node);
+    d->offset = int64ToIntS(vsapi->propGetInt(in, "offset", 0, &err));
+    d->order = !!vsapi->propGetInt(in, "order", 0, &err);
+
+    vsapi->createFilter(in, out, "DotKillZ", dotKillZInit, dotKillZGetFrame, dotKillZFree, fmParallelRequests, 0, d.release(), core);
+}
+
+/////////////////////////////////////////////////////////////////////
+// DotKillT
 
 constexpr int blockx = 16;
 constexpr int blocky = 8;
@@ -279,94 +436,6 @@ static void diffMetricToMask(uint8_t *mask, const int64_t *bdiffs1, const int64_
     memcpy(mask + nxblocks * (nyblocks - 1), mask + nxblocks * (nyblocks - 2), nxblocks);
 }
 
-static int64_t calcMetric(const VSFrameRef *f1, const VSFrameRef *f2, uint8_t *mask, int nxblocks, int nyblocks, int64_t &maxdiff, int field, int dupthresh, const VSAPI *vsapi) {
-    std::vector<int64_t> bdiffs(nxblocks * nyblocks);
-    for (int plane = 0; plane < 3; plane++) {
-        ptrdiff_t stride = vsapi->getStride(f1, plane);
-        const uint8_t *f1p = vsapi->getReadPtr(f1, plane);
-        const uint8_t *f2p = vsapi->getReadPtr(f2, plane);
-        const VSFormat *fi = vsapi->getFrameFormat(f1);
-
-        if (field) {
-            f1p += stride;
-            f2p += stride;
-        }
-
-        int width = vsapi->getFrameWidth(f1, plane);
-        int height = vsapi->getFrameHeight(f1, plane);
-        int hblockx = blockx / 2;
-        int hblocky = blocky / 2;
-        // adjust for subsampling
-        if (plane > 0) {
-            hblockx /= 1 << fi->subSamplingW;
-            hblocky /= 1 << fi->subSamplingH;
-        }
-
-        for (int y = 0; y < height / 2; y++) {
-            int ydest = y / hblocky;
-            int xdest = 0;
-
-            for (int x = 0; x < width; x += hblockx) {
-                int acc = 0;
-                int m = VSMIN(width, x + hblockx);
-                for (int xl = x; xl < m; xl++) {
-                    int tmp = f1p[xl] - f2p[xl];
-                    acc += tmp * tmp;
-                }
-                bdiffs[ydest * nxblocks + xdest] += acc;
-                xdest++;
-            }
-
-            f1p += stride * 2;
-            f2p += stride * 2;
-        }
-    }
-
-    for (int i = 1; i < nyblocks - 1; i++) {
-        for (int j = 1; j < nxblocks - 1; j++) {
-            int64_t tmp1 = bdiffs[i * nxblocks + j] + bdiffs[i * nxblocks + j + 1] + bdiffs[(i + 1) * nxblocks + j] + bdiffs[(i + 1) * nxblocks + j + 1];
-            int64_t tmp2 = bdiffs[i * nxblocks + j] + bdiffs[i * nxblocks + j - 1] + bdiffs[(i + 1) * nxblocks + j] + bdiffs[(i + 1) * nxblocks + j - 1];
-            int64_t tmp3 = bdiffs[i * nxblocks + j] + bdiffs[i * nxblocks - j + 1] + bdiffs[(i - 1) * nxblocks + j] + bdiffs[(i - 1) * nxblocks + j + 1];
-            int64_t tmp4 = bdiffs[i * nxblocks + j] + bdiffs[i * nxblocks - j - 1] + bdiffs[(i - 1) * nxblocks + j] + bdiffs[(i - 1) * nxblocks + j - 1];
-            tmp1 = std::max({ tmp1, tmp2, tmp3, tmp4 });
-            mask[nxblocks * i + j] = tmp1 < dupthresh ? 255 : 0;
-        }
-    }
-
-    int64_t maxdiff1 = -1;
-    for (int i = 0; i < nyblocks - 1; i++) {
-        for (int j = 0; j < nxblocks - 1; j++) {
-            int64_t tmp = bdiffs[i * nxblocks + j] + bdiffs[i * nxblocks + j + 1] + bdiffs[(i + 1) * nxblocks + j] + bdiffs[(i + 1) * nxblocks + j + 1];
-            if (tmp > maxdiff1)
-                maxdiff1 = tmp;
-        }
-    }
-    maxdiff = maxdiff1;
-
-    int64_t totdiff1 = 0;
-    for (int i = 0; i < nxblocks * nyblocks; i++) {
-        // saturate on overflow?
-        assert(totdiff1 + bdiffs[i] >= totdiff1);
-        totdiff1 += bdiffs[i];
-    }
-
-    return totdiff1;
-}
-
-typedef struct {
-    VSNodeRef *node;
-    const VSVideoInfo *vi;
-    int order;
-    int offset;
-} DotKillZData;
-
-
-static void VS_CC dotKillZInit(VSMap *in, VSMap *out, void **instanceData, VSNode *node, VSCore *core, const VSAPI *vsapi) {
-    DotKillZData *d = (DotKillZData *)*instanceData;
-    vsapi->setVideoInfo(d->vi, 1, node);
-}
-
-
 static void applyStaticMask2(VSFrameRef *dst, const VSFrameRef *f0, const VSFrameRef *f1, const VSFrameRef *f2, uint8_t *mask, int nxblocks, int nyblocks, int field, const VSAPI *vsapi) {
     for (int plane = 0; plane < 3; plane++) {
         ptrdiff_t stride = vsapi->getStride(f1, plane);
@@ -421,139 +490,6 @@ static void applyStaticMask2(VSFrameRef *dst, const VSFrameRef *f0, const VSFram
     }
 }
 
-static void applyFieldBlend(const VSFrameRef *srcc, const VSFrameRef *srcn, VSFrameRef *outframe, int order, VSCore *core, const VSAPI *vsapi) {
-    const VSFormat *fi = vsapi->getFrameFormat(srcc);
-    for (int plane = 0; plane < fi->numPlanes; plane++) {
-        int width = vsapi->getFrameWidth(srcc, plane);
-        int height = vsapi->getFrameHeight(srcc, plane);
-
-        int stride = vsapi->getStride(outframe, plane);
-        uint8_t *dstp = vsapi->getWritePtr(outframe, plane);
-        const uint8_t *srccp = vsapi->getReadPtr(srcc, plane);
-        const uint8_t *srcnp = vsapi->getReadPtr(srcn, plane);
-
-        if (order) {
-            srccp += stride;
-            srcnp += stride;
-            dstp += stride;
-        }
-
-        for (int h = order; h < height; h += 2) {
-            for (int w = 0; w < width; w++)
-                dstp[w] = (srccp[w] + srcnp[w] + 1) / 2;
-
-            srccp += 2 * stride;
-            srcnp += 2 * stride;
-            dstp += 2 * stride;
-        }
-    }
-}
-
-static void applyDotcrawInverse(const VSFrameRef *srcc, const VSFrameRef *srcn, VSFrameRef *outframe, int order, VSCore *core, const VSAPI *vsapi) {
-    const VSFormat *fi = vsapi->getFrameFormat(srcc);
-    for (int plane = 0; plane < fi->numPlanes; plane++) {
-        int width = vsapi->getFrameWidth(srcc, plane);
-        int height = vsapi->getFrameHeight(srcc, plane);
-
-        int stride = vsapi->getStride(outframe, plane);
-        uint8_t *dstp = vsapi->getWritePtr(outframe, plane);
-        const uint8_t *srccp = vsapi->getReadPtr(srcc, plane);
-        const uint8_t *srcnp = vsapi->getReadPtr(srcn, plane);
-
-        if (order) {
-            srccp += stride;
-            srcnp += stride;
-            dstp += stride;
-        }
-
-        for (int h = order; h < height; h += 2) {
-            for (int w = 0; w < width; w++) {
-                dstp[w] = (srccp[w] + srcnp[w] + 1) / 2;
-
-                if (h > 1) {
-                    uint8_t l0val = dstp[w - 2 * stride];
-                    uint8_t l2val = dstp[w];
-                    int l0diff = dstp[w - 2 * stride] - srccp[w - 2 * stride];
-                    int l2diff = dstp[w] - srccp[w];
-                    if (plane == 0)
-                        dstp[w - stride] = std::clamp(srccp[w - stride] + (order ? l0diff : l2diff), 16, 235);
-                    else
-                        dstp[w - stride] = (l0val + l2val + 1) / 2; // simply use some kind of interpolation and discard one field?
-                }
-            }
-
-            srccp += 2 * stride;
-            srcnp += 2 * stride;
-            dstp += 2 * stride;
-        }
-    }
-}
-
-static const VSFrameRef *VS_CC dotKillZGetFrame(int n, int activationReason, void **instanceData, void **frameData, VSFrameContext *frameCtx, VSCore *core, const VSAPI *vsapi) {
-    DotKillZData *d = (DotKillZData *)*instanceData;
-
-    if (activationReason == arInitial) {
-        vsapi->requestFrameFilter(std::max(n - 1, 0), d->node, frameCtx);
-        vsapi->requestFrameFilter(n, d->node, frameCtx);
-        vsapi->requestFrameFilter(n + 1, d->node, frameCtx);
-    } else if (activationReason == arAllFramesReady) {
-        const VSFrameRef *srcp = vsapi->getFrameFilter(std::max(n - 1, 0), d->node, frameCtx);
-        const VSFrameRef *srcc = vsapi->getFrameFilter(n, d->node, frameCtx);
-        const VSFrameRef *srcn = vsapi->getFrameFilter(n + 1, d->node, frameCtx);
-
-        /*
-            FIELD OFFSETS
-            -1  0  1  2  3
-            A1 B1 B1 C1 D1
-            A2 B2 C2 D2 D2
-        */
-
-        VSFrameRef *outframe = vsapi->copyFrame(srcc, core);
-        if ((n + d->offset) % 5 == 0) {
-            // current and next field are duplicates, complement field is from the same frame so do dotcrawl inverse on that as well
-            applyDotcrawInverse(srcc, srcn, outframe, d->order, core, vsapi);
-        } else if ((n + d->offset) % 5 == 1) {
-            // current and previous field are duplicates so blend them together
-            applyFieldBlend(srcc, srcp, outframe, d->order, core, vsapi);
-        } else if ((n + d->offset) % 5 == 2) {
-            // current and next complement field are duplicates so blend them together
-            applyFieldBlend(srcc, srcn, outframe, !d->order, core, vsapi);
-        } else if ((n + d->offset) % 5 == 3) {
-            // current and previous field are duplicates, complement field is from the same frame so do dotcrawl inverse on that as well
-            applyDotcrawInverse(srcc, srcp, outframe, !d->order, core, vsapi);
-        }
-
-        vsapi->freeFrame(srcp);
-        vsapi->freeFrame(srcc);
-        vsapi->freeFrame(srcn);
-
-        return outframe;
-    }
-
-    return nullptr;
-}
-
-static void VS_CC dotKillZFree(void *instanceData, VSCore *core, const VSAPI *vsapi) {
-    DotKillZData *d = (DotKillZData *)instanceData;
-    vsapi->freeNode(d->node);
-    delete d;
-}
-
-static void VS_CC dotKillZCreate(const VSMap *in, VSMap *out, void *userData, VSCore *core, const VSAPI *vsapi) {
-    std::unique_ptr<DotKillZData> d(new DotKillZData());
-
-    int err;
-    d->node = vsapi->propGetNode(in, "clip", 0, 0);
-    d->vi = vsapi->getVideoInfo(d->node);
-    d->offset = int64ToIntS(vsapi->propGetInt(in, "offset", 0, &err));
-    d->order = !!vsapi->propGetInt(in, "order", 0, &err);
-
-    vsapi->createFilter(in, out, "DotKillZ", dotKillZInit, dotKillZGetFrame, dotKillZFree, fmParallelRequests, 0, d.release(), core);
-}
-
-//////////////
-// DotKillT
-
 typedef struct {
     VSNodeRef *node;
     const VSVideoInfo *vi;
@@ -562,7 +498,6 @@ typedef struct {
     int dupthresh;
     int tratio;
 } DotKillTData;
-
 
 static const VSFrameRef *VS_CC dotKillTGetFrame(int n, int activationReason, void **instanceData, void **frameData, VSFrameContext *frameCtx, VSCore *core, const VSAPI *vsapi) {
     DotKillTData *d = (DotKillTData *)*instanceData;
