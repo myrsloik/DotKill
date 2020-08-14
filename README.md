@@ -1,13 +1,13 @@
 DotKill
-#######
+=======
 
 Spatio-temporal dotcrawl and rainbow remover for VapourSynth
 
 Functions
-#########
+=========
 
 DotKillS
-========
+--------
 
 dotkill.DotKillS(clip clip[, int iterations=1, bint usematch=False])
 
@@ -18,7 +18,7 @@ iterations: The number of times to apply the internal filter. Usally a number be
 usematch: If true then matching hints from VFM are used when processing. This may or may not have a positive effect.
 
 DotKillZ
-========
+--------
 
 dotkill.DotKillZ(clip clip[, int order=0, int offset=0])
 
@@ -31,7 +31,7 @@ order: Field order. Usually 0, note that 1 hasn't been tested due to a lack of t
 offset: The cycle offset for the pulldown pattern. A number between 0 and 4. Can only be determined by trial and error.
 
 DotKillT
-========
+--------
 
 dotkill.DotKillT(clip clip[, int order=0, int offset=0, int dupthresh=64, int tratio=3, bint show=False])
 
@@ -50,7 +50,7 @@ tratio: If more than 1/tratio blocks have changed between fields then temporal f
 show: Shows which blocks have been determined to contain no change between frames and therefore will be blended to reduce artifacts. White square means that it will blend with the next frame and black square the previous. 
 
 Usage
-#####
+=====
 
 clip = core.dotkill.DotKillT(clip, offset=1, dupthresh=64)
 clip = core.vivtc.VFM(clip)
