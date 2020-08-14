@@ -5,13 +5,6 @@
 #include <cstdlib>
 #include <vector>
 
-// FIXME, add show argument
-// white box = next temporal
-// black box = previous temporal
-// no box = standard processing
-
-// FIXME, show some more things like offset as well
-
 ////////////////////////////////////////
 // DotKillS
 
@@ -21,7 +14,6 @@ typedef struct {
     int iterations;
     bool usematch;
 } DotKillSData;
-
 
 static void VS_CC dotKillSInit(VSMap *in, VSMap *out, void **instanceData, VSNode *node, VSCore *core, const VSAPI *vsapi) {
     DotKillSData *d = (DotKillSData *)*instanceData;
@@ -436,7 +428,7 @@ static void diffMetricToMask(uint8_t *mask, const int64_t *bdiffs1, const int64_
     memcpy(mask + nxblocks * (nyblocks - 1), mask + nxblocks * (nyblocks - 2), nxblocks);
 }
 
-static void applyStaticMask2(VSFrameRef *dst, const VSFrameRef *f0, const VSFrameRef *f1, const VSFrameRef *f2, uint8_t *mask, int nxblocks, int nyblocks, int field, const VSAPI *vsapi) {
+static void applyTemporalMask(VSFrameRef *dst, const VSFrameRef *f0, const VSFrameRef *f1, const VSFrameRef *f2, uint8_t *mask, int nxblocks, int nyblocks, int field, bool show, const VSAPI *vsapi) {
     for (int plane = 0; plane < 3; plane++) {
         ptrdiff_t stride = vsapi->getStride(f1, plane);
         const uint8_t *f0p = vsapi->getReadPtr(f0, plane);
@@ -456,7 +448,7 @@ static void applyStaticMask2(VSFrameRef *dst, const VSFrameRef *f0, const VSFram
         int height = vsapi->getFrameHeight(f1, plane);
         int hblockx = blockx / 2;
         int hblocky = blocky / 2;
-        // adjust for subsampling
+
         if (plane > 0) {
             hblockx /= 1 << fi->subSamplingW;
             hblocky /= 1 << fi->subSamplingH;
@@ -476,7 +468,6 @@ static void applyStaticMask2(VSFrameRef *dst, const VSFrameRef *f0, const VSFram
                     else if (mask[ydest * nxblocks + xdest] == 2)
                         dstp[xl] = ((f2p[xl] + f0p[xl] + 1) / 2);
                     else
-                        //dstp[xl] = 255;
                         dstp[xl] = dstp[xl];
                 }
                 xdest++;
@@ -488,6 +479,55 @@ static void applyStaticMask2(VSFrameRef *dst, const VSFrameRef *f0, const VSFram
             dstp += stride * 2;
         }
     }
+
+    // Horrible square drawing code
+    if (show) {
+        ptrdiff_t stride = vsapi->getStride(dst, 0);
+        uint8_t *dstp = vsapi->getWritePtr(dst, 0);
+
+        int width = vsapi->getFrameWidth(dst, 0);
+        int height = vsapi->getFrameHeight(dst, 0);
+        int hblockx = blockx / 2;
+
+        for (int y = 0; y < height; y++) {
+            int ydest = y / blocky;
+            int xdest = 0;
+
+            for (int x = 0; x < width; x += hblockx) {
+                int m = std::min(width, x + hblockx);
+
+                if (y % blocky == 0) {
+                    for (int xl = x; xl < m; xl++) {
+                        if (mask[ydest * nxblocks + xdest] == 1) {
+                            dstp[xl] = 0;
+                        } else if (mask[ydest * nxblocks + xdest] == 2) {
+                            dstp[xl] = 255;
+                        }
+                    }
+                } else if (y % blocky == blocky - 1) {
+                    for (int xl = x; xl < m; xl++) {
+                        if (mask[ydest * nxblocks + xdest] == 1) {
+                            dstp[xl] = 0;
+                        } else if (mask[ydest * nxblocks + xdest] == 2) {
+                            dstp[xl] = 255;
+                        }
+                    }
+                }
+
+                if (mask[ydest * nxblocks + xdest] == 1) {
+                    dstp[x] = 0;
+                    dstp[m - 1] = 0;
+                } else if (mask[ydest * nxblocks + xdest] == 2) {
+                    dstp[x] = 255;
+                    dstp[m - 1] = 255;
+                }
+
+                xdest++;
+            }
+
+            dstp += stride;
+        }
+    }
 }
 
 typedef struct {
@@ -497,6 +537,7 @@ typedef struct {
     int offset;
     int dupthresh;
     int tratio;
+    bool show;
 } DotKillTData;
 
 static const VSFrameRef *VS_CC dotKillTGetFrame(int n, int activationReason, void **instanceData, void **frameData, VSFrameContext *frameCtx, VSCore *core, const VSAPI *vsapi) {
@@ -536,9 +577,7 @@ static const VSFrameRef *VS_CC dotKillTGetFrame(int n, int activationReason, voi
 
         VSFrameRef *outframe = vsapi->copyFrame(srcc, core);
 
-        vsapi->propSetInt(vsapi->getFramePropsRW(outframe), "offset", (n + d->offset) % 5, paReplace);
-
-        int64_t maxdiff = 0;
+        vsapi->propSetInt(vsapi->getFramePropsRW(outframe), "DotKillTOffset", (n + d->offset) % 5, paReplace);
 
         if ((n + d->offset) % 5 == 0) {
             // 1
@@ -553,7 +592,7 @@ static const VSFrameRef *VS_CC dotKillTGetFrame(int n, int activationReason, voi
 
             diffMetricToMask(mask.data(), maskprev1.data(), masknext1.data(), nxblocks, nyblocks, d->dupthresh, d->tratio, vsapi);
 
-            applyStaticMask2(outframe, srcc, srcp, srcn, mask.data(), nxblocks, nyblocks, !d->order, vsapi);
+            applyTemporalMask(outframe, srcc, srcp, srcn, mask.data(), nxblocks, nyblocks, !d->order, d->show, vsapi);
         } else if ((n + d->offset) % 5 == 1) {
             // 1
             applyFieldBlend(srcc, srcp, outframe, d->order, core, vsapi);
@@ -567,7 +606,7 @@ static const VSFrameRef *VS_CC dotKillTGetFrame(int n, int activationReason, voi
 
             diffMetricToMask(mask.data(), maskprev1.data(), masknext1.data(), nxblocks, nyblocks, d->dupthresh, d->tratio, vsapi);
 
-            applyStaticMask2(outframe, srcc, srcp, srcn, mask.data(), nxblocks, nyblocks, !d->order, vsapi);
+            applyTemporalMask(outframe, srcc, srcp, srcn, mask.data(), nxblocks, nyblocks, !d->order, d->show, vsapi);
         } else if ((n + d->offset) % 5 == 2) {
             // 1
             std::vector<int64_t> maskprev1(nxblocks * nyblocks);
@@ -578,7 +617,7 @@ static const VSFrameRef *VS_CC dotKillTGetFrame(int n, int activationReason, voi
 
             diffMetricToMask(mask.data(), maskprev1.data(), masknext1.data(), nxblocks, nyblocks, d->dupthresh, d->tratio, vsapi);
 
-            applyStaticMask2(outframe, srcc, srcp, srcn, mask.data(), nxblocks, nyblocks, d->order, vsapi);
+            applyTemporalMask(outframe, srcc, srcp, srcn, mask.data(), nxblocks, nyblocks, d->order, d->show, vsapi);
 
             // 2
             applyFieldBlend(srcc, srcn, outframe, !d->order, core, vsapi);
@@ -595,7 +634,7 @@ static const VSFrameRef *VS_CC dotKillTGetFrame(int n, int activationReason, voi
 
             diffMetricToMask(mask.data(), maskprev1.data(), masknext1.data(), nxblocks, nyblocks, d->dupthresh, d->tratio, vsapi);
 
-            applyStaticMask2(outframe, srcc, srcp, srcn, mask.data(), nxblocks, nyblocks, d->order, vsapi);
+            applyTemporalMask(outframe, srcc, srcp, srcn, mask.data(), nxblocks, nyblocks, d->order, d->show, vsapi);
         } else if ((n + d->offset) % 5 == 4) {
             // 1
             {
@@ -607,7 +646,7 @@ static const VSFrameRef *VS_CC dotKillTGetFrame(int n, int activationReason, voi
 
                 diffMetricToMask(mask.data(), maskprev1.data(), masknext1.data(), nxblocks, nyblocks, d->dupthresh, d->tratio, vsapi);
 
-                applyStaticMask2(outframe, srcc, srcp, srcn, mask.data(), nxblocks, nyblocks, d->order, vsapi);
+                applyTemporalMask(outframe, srcc, srcp, srcn, mask.data(), nxblocks, nyblocks, d->order, d->show, vsapi);
             }
 
             // 2
@@ -620,7 +659,7 @@ static const VSFrameRef *VS_CC dotKillTGetFrame(int n, int activationReason, voi
 
                 diffMetricToMask(mask.data(), maskprev1.data(), masknext1.data(), nxblocks, nyblocks, d->dupthresh, d->tratio, vsapi);
 
-                applyStaticMask2(outframe, srcc, srcp, srcn, mask.data(), nxblocks, nyblocks, !d->order, vsapi);
+                applyTemporalMask(outframe, srcc, srcp, srcn, mask.data(), nxblocks, nyblocks, !d->order, d->show, vsapi);
             }
         }
 
@@ -663,6 +702,7 @@ static void VS_CC dotKillTCreate(const VSMap *in, VSMap *out, void *userData, VS
     d->tratio = int64ToIntS(vsapi->propGetInt(in, "tratio", 0, &err));
     if (err || d->tratio < 1)
         d->tratio = 3;
+    d->show = !!vsapi->propGetInt(in, "show", 0, &err);
 
     vsapi->createFilter(in, out, "DotKillT", dotKillTInit, dotKillTGetFrame, dotKillTFree, fmParallelRequests, 0, d.release(), core);
 }
@@ -674,5 +714,5 @@ VS_EXTERNAL_API(void) VapourSynthPluginInit(VSConfigPlugin configFunc, VSRegiste
     configFunc("com.vapoursynth.dotkill", "dotkill", "VapourSynth DotKill", VAPOURSYNTH_API_VERSION, 1, plugin);
     registerFunc("DotKillS", "clip:clip;iterations:int:opt;usematch:int:opt;", dotKillSCreate, 0, plugin);
     registerFunc("DotKillZ", "clip:clip;order:int:opt;offset:int:opt;", dotKillZCreate, 0, plugin);
-    registerFunc("DotKillT", "clip:clip;order:int:opt;offset:int:opt;dupthresh:int:opt;tratio:int:opt;", dotKillTCreate, 0, plugin);
+    registerFunc("DotKillT", "clip:clip;order:int:opt;offset:int:opt;dupthresh:int:opt;tratio:int:opt;show:int:opt;", dotKillTCreate, 0, plugin);
 }
