@@ -459,7 +459,6 @@ static void applyTemporalMask(VSFrameRef *dst, const VSFrameRef *f0, const VSFra
             int xdest = 0;
 
             for (int x = 0; x < width; x += hblockx) {
-                int acc = 0;
                 int m = VSMIN(width, x + hblockx);
 
                 for (int xl = x; xl < m; xl++) {
