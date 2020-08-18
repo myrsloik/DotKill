@@ -22,7 +22,7 @@ DotKillZ
 
 dotkill.DotKillZ(clip clip[, int order=0, int offset=0])
 
-A pseudo-spatial dotcrawl and rainbow remover. It only workes on NTSC content with rainbows added after 3:2 pulldown. This is true most of the time for anime.
+A pseudo-spatial dotcrawl and rainbow remover. It only works on NTSC content with rainbows added after 3:2 pulldown. This is true most of the time for anime.
 
 Note that due to its nature only every other final frame will have dotcrawl and rainbows removed. Typically never artifacts if all requirements are met.
 
@@ -35,7 +35,7 @@ DotKillT
 
 dotkill.DotKillT(clip clip[, int order=0, int offset=0, int dupthresh=64, int tratio=3, bint show=False])
 
-A full spatioi-temporal dotcrawl and rainbow remover. It only workes on NTSC content with rainbows added after 3:2 pulldown. This is true most of the time for anime.
+A full spatioi-temporal dotcrawl and rainbow remover. It only works on NTSC content with rainbows added after 3:2 pulldown. This is true most of the time for anime.
 
 May produce extreme artifacting if dupthresh is set too high.
 
