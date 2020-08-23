@@ -9,7 +9,7 @@ Functions
 DotKillS
 --------
 
-dotkill.DotKillS(clip clip[, int iterations=1, bint usematch=False])
+dotkill.DotKillS(clip clip[, int iterations=1])
 
 A purely spatial dotcrawl remover that can be safely used on most material after field matching.
 

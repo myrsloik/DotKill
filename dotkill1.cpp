@@ -12,7 +12,6 @@ typedef struct {
     VSNodeRef *node;
     const VSVideoInfo *vi;
     int iterations;
-    bool usematch;
 } DotKillSData;
 
 static void VS_CC dotKillSInit(VSMap *in, VSMap *out, void **instanceData, VSNode *node, VSCore *core, const VSAPI *vsapi) {
@@ -122,11 +121,6 @@ static const VSFrameRef *VS_CC dotKillSGetFrame(int n, int activationReason, voi
         const VSFrameRef *inframe = vsapi->getFrameFilter(n, d->node, frameCtx);
         VSFrameRef *outframe = vsapi->copyFrame(inframe, core);
 
-        int err = 0;
-        int64_t match = vsapi->propGetInt(vsapi->getFramePropsRO(inframe), "VFMMatch", 0, &err);
-        vsapi->freeFrame(inframe);
-        bool isC = (!d->usematch || err || match == 1);
-
         int width = d->vi->width;
         int height = d->vi->height;
         int dstStride = vsapi->getStride(outframe, 0);
@@ -136,20 +130,12 @@ static const VSFrameRef *VS_CC dotKillSGetFrame(int n, int activationReason, voi
         uint8_t *ppMask = new uint8_t[width * height]();
 
         for (int i = 0; i < d->iterations; i++) {
-            if (isC) {
-                convVert<1>(dstPtr, dstStride, tempMask, width, height);
-                applyMask<1>(tempMask, dstPtr, dstStride, width, height, ppMask);
+            convVert<1>(dstPtr, dstStride, tempMask, width, height);
+            applyMask<1>(tempMask, dstPtr, dstStride, width, height, ppMask);
 
-                convHoriz<1>(dstPtr, dstStride, tempMask, width, height);
-                applyMask<1>(tempMask, dstPtr, dstStride, width, height, ppMask);
+            convHoriz<1>(dstPtr, dstStride, tempMask, width, height);
+            applyMask<1>(tempMask, dstPtr, dstStride, width, height, ppMask);
 
-            } else {
-                convVert<-1>(dstPtr, dstStride, tempMask, width, height);
-                applyMask<-1>(tempMask, dstPtr, dstStride, width, height, ppMask);
-
-                convHoriz<-1>(dstPtr, dstStride, tempMask, width, height);
-                applyMask<-1>(tempMask, dstPtr, dstStride, width, height, ppMask);
-            }
         }
 
         delete[] tempMask;
@@ -176,7 +162,6 @@ static void VS_CC dotKillSCreate(const VSMap *in, VSMap *out, void *userData, VS
     d->iterations = int64ToIntS(vsapi->propGetInt(in, "iterations", 0, &err));
     if (d->iterations < 1)
         d->iterations = 1;
-    d->usematch = !!vsapi->propGetInt(in, "usematch", 0, &err);
 
     vsapi->createFilter(in, out, "DotKillS", dotKillSInit, dotKillSGetFrame, dotKillSFree, fmParallel, 0, d.release(), core);
 }
@@ -569,6 +554,7 @@ static const VSFrameRef *VS_CC dotKillTGetFrame(int n, int activationReason, voi
 
         /*
             FIELD OFFSETS
+             +  -  +  -  +  -
             -1  0  1  2  3  4
             A1 B1 B1 C1 D1 E1
             A2 B2 C2 D2 D2 E2
@@ -711,7 +697,7 @@ static void VS_CC dotKillTCreate(const VSMap *in, VSMap *out, void *userData, VS
 
 VS_EXTERNAL_API(void) VapourSynthPluginInit(VSConfigPlugin configFunc, VSRegisterFunction registerFunc, VSPlugin *plugin) {
     configFunc("com.vapoursynth.dotkill", "dotkill", "VapourSynth DotKill", VAPOURSYNTH_API_VERSION, 1, plugin);
-    registerFunc("DotKillS", "clip:clip;iterations:int:opt;usematch:int:opt;", dotKillSCreate, 0, plugin);
+    registerFunc("DotKillS", "clip:clip;iterations:int:opt;", dotKillSCreate, 0, plugin);
     registerFunc("DotKillZ", "clip:clip;order:int:opt;offset:int:opt;", dotKillZCreate, 0, plugin);
     registerFunc("DotKillT", "clip:clip;order:int:opt;offset:int:opt;dupthresh:int:opt;tratio:int:opt;show:int:opt;", dotKillTCreate, 0, plugin);
 }
