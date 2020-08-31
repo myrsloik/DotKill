@@ -160,6 +160,12 @@ static void VS_CC dotKillSCreate(const VSMap *in, VSMap *out, void *userData, VS
     if (d->iterations < 1)
         d->iterations = 1;
 
+    if (!d->vi->format || d->vi->format->id != pfYUV420P8) {
+        vsapi->setError(out, "DotKillS: only YUV420P8 supported");
+        vsapi->freeNode(d->node);
+        return;
+    }
+
     vsapi->createFilter(in, out, "DotKillS", dotKillSInit, dotKillSGetFrame, dotKillSFree, fmParallel, 0, d.release(), core);
 }
 
@@ -306,6 +312,12 @@ static void VS_CC dotKillZCreate(const VSMap *in, VSMap *out, void *userData, VS
     d->vi = vsapi->getVideoInfo(d->node);
     d->offset = int64ToIntS(vsapi->propGetInt(in, "offset", 0, &err));
     d->order = !!vsapi->propGetInt(in, "order", 0, &err);
+
+    if (!d->vi->format || d->vi->format->id != pfYUV420P8) {
+        vsapi->setError(out, "DotKillZ: only YUV420P8 supported");
+        vsapi->freeNode(d->node);
+        return;
+    }
 
     vsapi->createFilter(in, out, "DotKillZ", dotKillZInit, dotKillZGetFrame, dotKillZFree, fmParallelRequests, 0, d.release(), core);
 }
@@ -685,6 +697,12 @@ static void VS_CC dotKillTCreate(const VSMap *in, VSMap *out, void *userData, VS
     if (err || d->tratio < 1)
         d->tratio = 3;
     d->show = !!vsapi->propGetInt(in, "show", 0, &err);
+
+    if (!d->vi->format || d->vi->format->id != pfYUV420P8) {
+        vsapi->setError(out, "DotKillT: only YUV420P8 supported");
+        vsapi->freeNode(d->node);
+        return;
+    }
 
     vsapi->createFilter(in, out, "DotKillT", dotKillTInit, dotKillTGetFrame, dotKillTFree, fmParallelRequests, 0, d.release(), core);
 }
