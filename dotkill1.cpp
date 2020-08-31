@@ -19,7 +19,6 @@ static void VS_CC dotKillSInit(VSMap *in, VSMap *out, void **instanceData, VSNod
     vsapi->setVideoInfo(d->vi, 1, node);
 }
 
-template<int sign>
 static void convHoriz(const uint8_t *src, int srcStride, int16_t *dst, int width, int height) {
     while (--height) {
         dst[0] = 0;
@@ -27,7 +26,7 @@ static void convHoriz(const uint8_t *src, int srcStride, int16_t *dst, int width
 
         for (int x = 2; x < width - 3; x++) {
             int16_t temp = -(src[x - 2] + src[x - 1]) + 2 * (src[x] + src[x + 1]) - (src[x + 2] + src[x + 3]);
-            temp += sign * (-(src[x - 2 + srcStride] + src[x - 1 + srcStride]) + 2 * (src[x + srcStride] + src[x + 1 + srcStride]) - (src[x + 2 + srcStride] + src[x + 3 + srcStride]));
+            temp += -(src[x - 2 + srcStride] + src[x - 1 + srcStride]) + 2 * (src[x + srcStride] + src[x + 1 + srcStride]) - (src[x + 2 + srcStride] + src[x + 3 + srcStride]);
             dst[x] = temp;
         }
 
@@ -41,7 +40,6 @@ static void convHoriz(const uint8_t *src, int srcStride, int16_t *dst, int width
     memset(dst, 0, sizeof(int16_t) * width);
 }
 
-template<int sign>
 static void convVert(const uint8_t *src, int srcStride, int16_t *dst, int width, int height) {
     height -= 5;
 
@@ -51,9 +49,9 @@ static void convVert(const uint8_t *src, int srcStride, int16_t *dst, int width,
 
     while (height--) {
         for (int x = 0; x < width - 1; x++) {
-            dst[x] = -(src[x - 2 * srcStride] + src[x - 2 * srcStride + 1] + sign * (src[x - 1 * srcStride] + src[x - 1 * srcStride + 1]))
-                + 2 * (src[x] + src[x + 1] + sign * (src[x + 1 * srcStride] + src[x + 1 * srcStride + 1]))
-                - (src[x + 2 * srcStride] + src[x + 2 * srcStride + 1] + sign * (src[x + 3 * srcStride] + src[x + 3 * srcStride + 1]));
+            dst[x] = -(src[x - 2 * srcStride] + src[x - 2 * srcStride + 1] + (src[x - 1 * srcStride] + src[x - 1 * srcStride + 1]))
+                + 2 * (src[x] + src[x + 1] + (src[x + 1 * srcStride] + src[x + 1 * srcStride + 1]))
+                - (src[x + 2 * srcStride] + src[x + 2 * srcStride + 1] + (src[x + 3 * srcStride] + src[x + 3 * srcStride + 1]));
         }
 
         dst[width - 1] = 0;
@@ -65,7 +63,6 @@ static void convVert(const uint8_t *src, int srcStride, int16_t *dst, int width,
     memset(dst, 0, sizeof(int16_t) * width * 3);
 }
 
-template<int sign>
 static void applyMask(const int16_t *maskPtr, uint8_t *dst, int dstStride, int width, int height, uint8_t *ppMask) {
     maskPtr += width;
     ppMask += width;
@@ -101,8 +98,8 @@ static void applyMask(const int16_t *maskPtr, uint8_t *dst, int dstStride, int w
 
                 dst[x] = static_cast<uint8_t>(std::clamp(dst[x] - t, 16, 235));
                 dst[x + 1] = static_cast<uint8_t>(std::clamp(dst[x + 1] - t, 16, 235));
-                dst[x + dstStride] = static_cast<uint8_t>(std::clamp(dst[x + dstStride] - sign * t, 16, 235));
-                dst[x + 1 + dstStride] = static_cast<uint8_t>(std::clamp(dst[x + 1 + dstStride] - sign * t, 16, 235));
+                dst[x + dstStride] = static_cast<uint8_t>(std::clamp(dst[x + dstStride] - t, 16, 235));
+                dst[x + 1 + dstStride] = static_cast<uint8_t>(std::clamp(dst[x + 1 + dstStride] - t, 16, 235));
             }
         }
 
@@ -130,11 +127,11 @@ static const VSFrameRef *VS_CC dotKillSGetFrame(int n, int activationReason, voi
         uint8_t *ppMask = new uint8_t[width * height]();
 
         for (int i = 0; i < d->iterations; i++) {
-            convVert<1>(dstPtr, dstStride, tempMask, width, height);
-            applyMask<1>(tempMask, dstPtr, dstStride, width, height, ppMask);
+            convVert(dstPtr, dstStride, tempMask, width, height);
+            applyMask(tempMask, dstPtr, dstStride, width, height, ppMask);
 
-            convHoriz<1>(dstPtr, dstStride, tempMask, width, height);
-            applyMask<1>(tempMask, dstPtr, dstStride, width, height, ppMask);
+            convHoriz(dstPtr, dstStride, tempMask, width, height);
+            applyMask(tempMask, dstPtr, dstStride, width, height, ppMask);
 
         }
 
