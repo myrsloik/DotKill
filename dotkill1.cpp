@@ -160,8 +160,8 @@ static void VS_CC dotKillSCreate(const VSMap *in, VSMap *out, void *userData, VS
     if (d->iterations < 1)
         d->iterations = 1;
 
-    if (!d->vi->format || d->vi->format->id != pfYUV420P8) {
-        vsapi->setError(out, "DotKillS: only YUV420P8 supported");
+    if (!d->vi->format || d->vi->format->bitsPerSample != 8 || (d->vi->format->colorFamily != cmGray && d->vi->format->colorFamily != cmYUV)) {
+        vsapi->setError(out, "DotKillS: only 8 bit YUV and GRAY supported");
         vsapi->freeNode(d->node);
         return;
     }
