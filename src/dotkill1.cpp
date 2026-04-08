@@ -1,5 +1,5 @@
-#include "VapourSynth.h"
-#include "VSHelper.h"
+#include "VapourSynth4.h"
+#include "VSHelper4.h"
 #include <algorithm>
 #include <memory>
 #include <cstdlib>
@@ -9,17 +9,12 @@
 // DotKillS
 
 typedef struct {
-    VSNodeRef *node;
+    VSNode *node;
     const VSVideoInfo *vi;
     int iterations;
 } DotKillSData;
 
-static void VS_CC dotKillSInit(VSMap *in, VSMap *out, void **instanceData, VSNode *node, VSCore *core, const VSAPI *vsapi) {
-    DotKillSData *d = (DotKillSData *)*instanceData;
-    vsapi->setVideoInfo(d->vi, 1, node);
-}
-
-static void convHoriz(const uint8_t *src, int srcStride, int16_t *dst, int width, int height) {
+static void convHoriz(const uint8_t *src, ptrdiff_t srcStride, int16_t *dst, int width, int height) {
     while (--height) {
         dst[0] = 0;
         dst[1] = 0;
@@ -40,7 +35,7 @@ static void convHoriz(const uint8_t *src, int srcStride, int16_t *dst, int width
     memset(dst, 0, sizeof(int16_t) * width);
 }
 
-static void convVert(const uint8_t *src, int srcStride, int16_t *dst, int width, int height) {
+static void convVert(const uint8_t *src, ptrdiff_t srcStride, int16_t *dst, int width, int height) {
     height -= 5;
 
     memset(dst, 0, sizeof(int16_t) * width * 2);
@@ -63,7 +58,7 @@ static void convVert(const uint8_t *src, int srcStride, int16_t *dst, int width,
     memset(dst, 0, sizeof(int16_t) * width * 3);
 }
 
-static void applyMask(const int16_t *maskPtr, uint8_t *dst, int dstStride, int width, int height, uint8_t *ppMask) {
+static void applyMask(const int16_t *maskPtr, uint8_t *dst, ptrdiff_t dstStride, int width, int height, uint8_t *ppMask) {
     maskPtr += width;
     ppMask += width;
     dst += dstStride;
@@ -109,18 +104,18 @@ static void applyMask(const int16_t *maskPtr, uint8_t *dst, int dstStride, int w
     }
 }
 
-static const VSFrameRef *VS_CC dotKillSGetFrame(int n, int activationReason, void **instanceData, void **frameData, VSFrameContext *frameCtx, VSCore *core, const VSAPI *vsapi) {
-    DotKillSData *d = (DotKillSData *)*instanceData;
+static const VSFrame *VS_CC dotKillSGetFrame(int n, int activationReason, void *instanceData, void **frameData, VSFrameContext *frameCtx, VSCore *core, const VSAPI *vsapi) {
+    DotKillSData *d = reinterpret_cast<DotKillSData*>(instanceData);
 
     if (activationReason == arInitial) {
         vsapi->requestFrameFilter(n, d->node, frameCtx);
     } else if (activationReason == arAllFramesReady) {
-        const VSFrameRef *inframe = vsapi->getFrameFilter(n, d->node, frameCtx);
-        VSFrameRef *outframe = vsapi->copyFrame(inframe, core);
+        const VSFrame *inframe = vsapi->getFrameFilter(n, d->node, frameCtx);
+        VSFrame *outframe = vsapi->copyFrame(inframe, core);
 
         int width = d->vi->width;
         int height = d->vi->height;
-        int dstStride = vsapi->getStride(outframe, 0);
+        ptrdiff_t dstStride = vsapi->getStride(outframe, 0);
         uint8_t *dstPtr = vsapi->getWritePtr(outframe, 0);
 
         int16_t *tempMask = new int16_t[width * height];
@@ -145,7 +140,7 @@ static const VSFrameRef *VS_CC dotKillSGetFrame(int n, int activationReason, voi
 }
 
 static void VS_CC dotKillSFree(void *instanceData, VSCore *core, const VSAPI *vsapi) {
-    DotKillSData *d = (DotKillSData *)instanceData;
+    DotKillSData *d = reinterpret_cast<DotKillSData*>(instanceData);
     vsapi->freeNode(d->node);
     delete d;
 }
@@ -154,33 +149,33 @@ static void VS_CC dotKillSCreate(const VSMap *in, VSMap *out, void *userData, VS
     std::unique_ptr<DotKillSData> d(new DotKillSData());
 
     int err;
-    d->node = vsapi->propGetNode(in, "clip", 0, 0);
+    d->node = vsapi->mapGetNode(in, "clip", 0, nullptr);
     d->vi = vsapi->getVideoInfo(d->node);
-    d->iterations = int64ToIntS(vsapi->propGetInt(in, "iterations", 0, &err));
+    d->iterations = vsapi->mapGetIntSaturated(in, "iterations", 0, &err);
     if (d->iterations < 1)
         d->iterations = 1;
-
-    if (!d->vi->format || d->vi->format->bitsPerSample != 8 || (d->vi->format->colorFamily != cmGray && d->vi->format->colorFamily != cmYUV)) {
-        vsapi->setError(out, "DotKillS: only 8 bit YUV and GRAY supported");
+    if ((!vsh::isSameVideoPresetFormat(pfYUV420P8, &d->vi->format, core, vsapi) && !vsh::isSameVideoPresetFormat(pfGray8, &d->vi->format, core, vsapi)) || !vsh::isConstantVideoFormat(d->vi)) {
+        vsapi->mapSetError(out, "DotKillS: only constant dimension YUV420P8 and GRAY8 supported");
         vsapi->freeNode(d->node);
         return;
     }
 
-    vsapi->createFilter(in, out, "DotKillS", dotKillSInit, dotKillSGetFrame, dotKillSFree, fmParallel, 0, d.release(), core);
+    VSFilterDependency deps[] = { {d->node, rpStrictSpatial} };
+    vsapi->createVideoFilter(out, "DotKillS", d->vi, dotKillSGetFrame, dotKillSFree, fmParallel, deps, 1, d.get(), core);
+    d.release();
 }
-
 
 /////////////////////////////////////////////////////////////////////
 // DotKillZ
 
 
-static void applyFieldBlend(const VSFrameRef *srcc, const VSFrameRef *srcn, VSFrameRef *outframe, int order, VSCore *core, const VSAPI *vsapi) {
-    const VSFormat *fi = vsapi->getFrameFormat(srcc);
+static void applyFieldBlend(const VSFrame *srcc, const VSFrame *srcn, VSFrame *outframe, int order, VSCore *core, const VSAPI *vsapi) {
+    const VSVideoFormat *fi = vsapi->getVideoFrameFormat(srcc);
     for (int plane = 0; plane < fi->numPlanes; plane++) {
         int width = vsapi->getFrameWidth(srcc, plane);
         int height = vsapi->getFrameHeight(srcc, plane);
 
-        int stride = vsapi->getStride(outframe, plane);
+        ptrdiff_t stride = vsapi->getStride(outframe, plane);
         uint8_t *dstp = vsapi->getWritePtr(outframe, plane);
         const uint8_t *srccp = vsapi->getReadPtr(srcc, plane);
         const uint8_t *srcnp = vsapi->getReadPtr(srcn, plane);
@@ -202,13 +197,13 @@ static void applyFieldBlend(const VSFrameRef *srcc, const VSFrameRef *srcn, VSFr
     }
 }
 
-static void applyDotcrawInverse(const VSFrameRef *srcc, const VSFrameRef *srcn, VSFrameRef *outframe, int order, VSCore *core, const VSAPI *vsapi) {
-    const VSFormat *fi = vsapi->getFrameFormat(srcc);
+static void applyDotcrawInverse(const VSFrame *srcc, const VSFrame *srcn, VSFrame *outframe, int order, VSCore *core, const VSAPI *vsapi) {
+    const VSVideoFormat *fi = vsapi->getVideoFrameFormat(srcc);
     for (int plane = 0; plane < fi->numPlanes; plane++) {
         int width = vsapi->getFrameWidth(srcc, plane);
         int height = vsapi->getFrameHeight(srcc, plane);
 
-        int stride = vsapi->getStride(outframe, plane);
+        ptrdiff_t stride = vsapi->getStride(outframe, plane);
         uint8_t *dstp = vsapi->getWritePtr(outframe, plane);
         const uint8_t *srccp = vsapi->getReadPtr(srcc, plane);
         const uint8_t *srcnp = vsapi->getReadPtr(srcn, plane);
@@ -243,28 +238,23 @@ static void applyDotcrawInverse(const VSFrameRef *srcc, const VSFrameRef *srcn, 
 }
 
 typedef struct {
-    VSNodeRef *node;
+    VSNode *node;
     const VSVideoInfo *vi;
     int order;
     int offset;
 } DotKillZData;
 
-static void VS_CC dotKillZInit(VSMap *in, VSMap *out, void **instanceData, VSNode *node, VSCore *core, const VSAPI *vsapi) {
-    DotKillZData *d = (DotKillZData *)*instanceData;
-    vsapi->setVideoInfo(d->vi, 1, node);
-}
-
-static const VSFrameRef *VS_CC dotKillZGetFrame(int n, int activationReason, void **instanceData, void **frameData, VSFrameContext *frameCtx, VSCore *core, const VSAPI *vsapi) {
-    DotKillZData *d = (DotKillZData *)*instanceData;
+static const VSFrame *VS_CC dotKillZGetFrame(int n, int activationReason, void *instanceData, void **frameData, VSFrameContext *frameCtx, VSCore *core, const VSAPI *vsapi) {
+    DotKillZData *d = reinterpret_cast<DotKillZData*>(instanceData);
 
     if (activationReason == arInitial) {
         vsapi->requestFrameFilter(std::max(n - 1, 0), d->node, frameCtx);
         vsapi->requestFrameFilter(n, d->node, frameCtx);
         vsapi->requestFrameFilter(n + 1, d->node, frameCtx);
     } else if (activationReason == arAllFramesReady) {
-        const VSFrameRef *srcp = vsapi->getFrameFilter(std::max(n - 1, 0), d->node, frameCtx);
-        const VSFrameRef *srcc = vsapi->getFrameFilter(n, d->node, frameCtx);
-        const VSFrameRef *srcn = vsapi->getFrameFilter(n + 1, d->node, frameCtx);
+        const VSFrame *srcp = vsapi->getFrameFilter(std::max(n - 1, 0), d->node, frameCtx);
+        const VSFrame *srcc = vsapi->getFrameFilter(n, d->node, frameCtx);
+        const VSFrame *srcn = vsapi->getFrameFilter(n + 1, d->node, frameCtx);
 
         /*
             FIELD OFFSETS
@@ -273,7 +263,7 @@ static const VSFrameRef *VS_CC dotKillZGetFrame(int n, int activationReason, voi
             A2 B2 C2 D2 D2
         */
 
-        VSFrameRef *outframe = vsapi->copyFrame(srcc, core);
+        VSFrame *outframe = vsapi->copyFrame(srcc, core);
         if ((n + d->offset) % 5 == 0) {
             // current and next field are duplicates, complement field is from the same frame so do dotcrawl inverse on that as well
             applyDotcrawInverse(srcc, srcn, outframe, d->order, core, vsapi);
@@ -299,7 +289,7 @@ static const VSFrameRef *VS_CC dotKillZGetFrame(int n, int activationReason, voi
 }
 
 static void VS_CC dotKillZFree(void *instanceData, VSCore *core, const VSAPI *vsapi) {
-    DotKillZData *d = (DotKillZData *)instanceData;
+    DotKillZData *d = reinterpret_cast<DotKillZData*>(instanceData);
     vsapi->freeNode(d->node);
     delete d;
 }
@@ -308,18 +298,20 @@ static void VS_CC dotKillZCreate(const VSMap *in, VSMap *out, void *userData, VS
     std::unique_ptr<DotKillZData> d(new DotKillZData());
 
     int err;
-    d->node = vsapi->propGetNode(in, "clip", 0, 0);
+    d->node = vsapi->mapGetNode(in, "clip", 0, nullptr);
     d->vi = vsapi->getVideoInfo(d->node);
-    d->offset = int64ToIntS(vsapi->propGetInt(in, "offset", 0, &err));
-    d->order = !!vsapi->propGetInt(in, "order", 0, &err);
+    d->offset = vsapi->mapGetIntSaturated(in, "offset", 0, &err);
+    d->order = !!vsapi->mapGetInt(in, "order", 0, &err);
 
-    if (!d->vi->format || d->vi->format->id != pfYUV420P8) {
-        vsapi->setError(out, "DotKillZ: only YUV420P8 supported");
+    if (!vsh::isSameVideoPresetFormat(pfYUV420P8, &d->vi->format, core, vsapi) || !vsh::isConstantVideoFormat(d->vi)) {
+        vsapi->mapSetError(out, "DotKillZ: only constant dimension YUV420P8 supported");
         vsapi->freeNode(d->node);
         return;
     }
 
-    vsapi->createFilter(in, out, "DotKillZ", dotKillZInit, dotKillZGetFrame, dotKillZFree, fmParallelRequests, 0, d.release(), core);
+    VSFilterDependency deps[] = { {d->node, rpGeneral} };
+    vsapi->createVideoFilter(out, "DotKillZ", d->vi, dotKillZGetFrame, dotKillZFree, fmParallelRequests, deps, 1, d.get(), core);
+    d.release();
 }
 
 /////////////////////////////////////////////////////////////////////
@@ -328,12 +320,12 @@ static void VS_CC dotKillZCreate(const VSMap *in, VSMap *out, void *userData, VS
 constexpr int blockx = 16;
 constexpr int blocky = 8;
 
-static void calcDiffMetric(const VSFrameRef *f1, const VSFrameRef *f2, int64_t *bdiffs, int nxblocks, int nyblocks,int field, const VSAPI *vsapi) {
+static void calcDiffMetric(const VSFrame *f1, const VSFrame *f2, int64_t *bdiffs, int nxblocks, int nyblocks,int field, const VSAPI *vsapi) {
     for (int plane = 0; plane < 3; plane++) {
         ptrdiff_t stride = vsapi->getStride(f1, plane);
         const uint8_t *f1p = vsapi->getReadPtr(f1, plane);
         const uint8_t *f2p = vsapi->getReadPtr(f2, plane);
-        const VSFormat *fi = vsapi->getFrameFormat(f1);
+        const VSVideoFormat *fi = vsapi->getVideoFrameFormat(f1);
 
         if (field) {
             f1p += stride;
@@ -422,14 +414,14 @@ static void diffMetricToMask(uint8_t *mask, const int64_t *bdiffs1, const int64_
     memcpy(mask + nxblocks * (nyblocks - 1), mask + nxblocks * (nyblocks - 2), nxblocks);
 }
 
-static void applyTemporalMask(VSFrameRef *dst, const VSFrameRef *f0, const VSFrameRef *f1, const VSFrameRef *f2, uint8_t *mask, int nxblocks, int nyblocks, int field, bool show, const VSAPI *vsapi) {
+static void applyTemporalMask(VSFrame *dst, const VSFrame *f0, const VSFrame *f1, const VSFrame *f2, uint8_t *mask, int nxblocks, int nyblocks, int field, bool show, const VSAPI *vsapi) {
     for (int plane = 0; plane < 3; plane++) {
         ptrdiff_t stride = vsapi->getStride(f1, plane);
         const uint8_t *f0p = vsapi->getReadPtr(f0, plane);
         const uint8_t *f1p = vsapi->getReadPtr(f1, plane);
         const uint8_t *f2p = vsapi->getReadPtr(f2, plane);
         uint8_t *dstp = vsapi->getWritePtr(dst, plane);
-        const VSFormat *fi = vsapi->getFrameFormat(f1);
+        const VSVideoFormat *fi = vsapi->getVideoFrameFormat(f1);
 
         if (field) {
             f0p += stride;
@@ -524,7 +516,7 @@ static void applyTemporalMask(VSFrameRef *dst, const VSFrameRef *f0, const VSFra
 }
 
 typedef struct {
-    VSNodeRef *node;
+    VSNode *node;
     const VSVideoInfo *vi;
     int order;
     int offset;
@@ -533,8 +525,8 @@ typedef struct {
     bool show;
 } DotKillTData;
 
-static const VSFrameRef *VS_CC dotKillTGetFrame(int n, int activationReason, void **instanceData, void **frameData, VSFrameContext *frameCtx, VSCore *core, const VSAPI *vsapi) {
-    DotKillTData *d = (DotKillTData *)*instanceData;
+static const VSFrame *VS_CC dotKillTGetFrame(int n, int activationReason, void *instanceData, void **frameData, VSFrameContext *frameCtx, VSCore *core, const VSAPI *vsapi) {
+    DotKillTData *d = reinterpret_cast<DotKillTData*>(instanceData);
 
     int nxblocks = (d->vi->width + blockx / 2 - 1) / (blockx / 2);
     int nyblocks = (d->vi->height + blocky / 2 - 1) / (blocky / 2);
@@ -546,11 +538,11 @@ static const VSFrameRef *VS_CC dotKillTGetFrame(int n, int activationReason, voi
         vsapi->requestFrameFilter(n + 1, d->node, frameCtx);
         vsapi->requestFrameFilter(n + 2, d->node, frameCtx);
     } else if (activationReason == arAllFramesReady) {
-        const VSFrameRef *srcpp = vsapi->getFrameFilter(std::max(n - 2, 0), d->node, frameCtx);
-        const VSFrameRef *srcp = vsapi->getFrameFilter(std::max(n - 1, 0), d->node, frameCtx);
-        const VSFrameRef *srcc = vsapi->getFrameFilter(n, d->node, frameCtx);
-        const VSFrameRef *srcn = vsapi->getFrameFilter(n + 1, d->node, frameCtx);
-        const VSFrameRef *srcnn = vsapi->getFrameFilter(n + 2, d->node, frameCtx);
+        const VSFrame *srcpp = vsapi->getFrameFilter(std::max(n - 2, 0), d->node, frameCtx);
+        const VSFrame *srcp = vsapi->getFrameFilter(std::max(n - 1, 0), d->node, frameCtx);
+        const VSFrame *srcc = vsapi->getFrameFilter(n, d->node, frameCtx);
+        const VSFrame *srcn = vsapi->getFrameFilter(n + 1, d->node, frameCtx);
+        const VSFrame *srcnn = vsapi->getFrameFilter(n + 2, d->node, frameCtx);
 
         // first two fields are duplicates, meaning that offset 0, 1 and 5, 6 are used in the various calculations
         // fields 2, 3 and 4 needs to have determined how many blocks are consecutively static
@@ -569,9 +561,9 @@ static const VSFrameRef *VS_CC dotKillTGetFrame(int n, int activationReason, voi
             A2 B2 C2 D2 D2 E2
         */
 
-        VSFrameRef *outframe = vsapi->copyFrame(srcc, core);
+        VSFrame *outframe = vsapi->copyFrame(srcc, core);
 
-        vsapi->propSetInt(vsapi->getFramePropsRW(outframe), "DotKillTOffset", (n + d->offset) % 5, paReplace);
+        vsapi->mapSetInt(vsapi->getFramePropertiesRW(outframe), "DotKillTOffset", (n + d->offset) % 5, maReplace);
 
         if ((n + d->offset) % 5 == 0) {
             // 1
@@ -670,49 +662,45 @@ static const VSFrameRef *VS_CC dotKillTGetFrame(int n, int activationReason, voi
 }
 
 static void VS_CC dotKillTFree(void *instanceData, VSCore *core, const VSAPI *vsapi) {
-    DotKillTData *d = (DotKillTData *)instanceData;
+    DotKillTData *d = reinterpret_cast<DotKillTData*>(instanceData);
     vsapi->freeNode(d->node);
     delete d;
 }
-
-static void VS_CC dotKillTInit(VSMap *in, VSMap *out, void **instanceData, VSNode *node, VSCore *core, const VSAPI *vsapi) {
-    DotKillTData *d = (DotKillTData *)*instanceData;
-    vsapi->setVideoInfo(d->vi, 1, node);
-}
-
 
 static void VS_CC dotKillTCreate(const VSMap *in, VSMap *out, void *userData, VSCore *core, const VSAPI *vsapi) {
     std::unique_ptr<DotKillTData> d(new DotKillTData());
 
     int err;
-    d->node = vsapi->propGetNode(in, "clip", 0, 0);
+    d->node = vsapi->mapGetNode(in, "clip", 0, nullptr);
     d->vi = vsapi->getVideoInfo(d->node);
-    d->offset = int64ToIntS(vsapi->propGetInt(in, "offset", 0, &err));
-    d->order = !!vsapi->propGetInt(in, "order", 0, &err);
-    d->dupthresh = int64ToIntS(vsapi->propGetInt(in, "dupthresh", 0, &err));
+    d->offset = vsapi->mapGetIntSaturated(in, "offset", 0, &err);
+    d->order = !!vsapi->mapGetInt(in, "order", 0, &err);
+    d->dupthresh = vsapi->mapGetIntSaturated(in, "dupthresh", 0, &err);
     if (err || d->dupthresh < 0)
         d->dupthresh = 64;
     d->dupthresh *= d->dupthresh;
-    d->tratio = int64ToIntS(vsapi->propGetInt(in, "tratio", 0, &err));
+    d->tratio = vsapi->mapGetIntSaturated(in, "tratio", 0, &err);
     if (err || d->tratio < 1)
         d->tratio = 3;
-    d->show = !!vsapi->propGetInt(in, "show", 0, &err);
+    d->show = !!vsapi->mapGetInt(in, "show", 0, &err);
 
-    if (!d->vi->format || d->vi->format->id != pfYUV420P8) {
-        vsapi->setError(out, "DotKillT: only YUV420P8 supported");
+    if (!vsh::isSameVideoPresetFormat(pfYUV420P8, &d->vi->format, core, vsapi) || !vsh::isConstantVideoFormat(d->vi)) {
+        vsapi->mapSetError(out, "DotKillT: only constant dimension YUV420P8 supported");
         vsapi->freeNode(d->node);
         return;
     }
 
-    vsapi->createFilter(in, out, "DotKillT", dotKillTInit, dotKillTGetFrame, dotKillTFree, fmParallelRequests, 0, d.release(), core);
+    VSFilterDependency deps[] = { {d->node, rpGeneral} };
+    vsapi->createVideoFilter(out, "DotKillT", d->vi, dotKillTGetFrame, dotKillTFree, fmParallelRequests, deps, 1, d.get(), core);
+    d.release();
 }
 
 //////////////////////////////////////////
 // Init
 
-VS_EXTERNAL_API(void) VapourSynthPluginInit(VSConfigPlugin configFunc, VSRegisterFunction registerFunc, VSPlugin *plugin) {
-    configFunc("com.vapoursynth.dotkill", "dotkill", "VapourSynth DotKill", VAPOURSYNTH_API_VERSION, 1, plugin);
-    registerFunc("DotKillS", "clip:clip;iterations:int:opt;", dotKillSCreate, 0, plugin);
-    registerFunc("DotKillZ", "clip:clip;order:int:opt;offset:int:opt;", dotKillZCreate, 0, plugin);
-    registerFunc("DotKillT", "clip:clip;order:int:opt;offset:int:opt;dupthresh:int:opt;tratio:int:opt;show:int:opt;", dotKillTCreate, 0, plugin);
+VS_EXTERNAL_API(void) VapourSynthPluginInit2(VSPlugin *plugin, const VSPLUGINAPI *vspapi) {
+    vspapi->configPlugin("com.vapoursynth.dotkill", "dotkill", "VapourSynth DotKill", VS_MAKE_VERSION(4, 0), VAPOURSYNTH_API_VERSION, 0, plugin);
+    vspapi->registerFunction("DotKillS", "clip:vnode;iterations:int:opt;", "clip:vnode", dotKillSCreate, 0, plugin);
+    vspapi->registerFunction("DotKillZ", "clip:vnode;order:int:opt;offset:int:opt;", "clip:vnode", dotKillZCreate, 0, plugin);
+    vspapi->registerFunction("DotKillT", "clip:vnode;order:int:opt;offset:int:opt;dupthresh:int:opt;tratio:int:opt;show:int:opt;", "clip:vnode", dotKillTCreate, 0, plugin);
 }
