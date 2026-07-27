@@ -13,9 +13,9 @@ dotkill.DotKillS(clip clip[, int iterations=1])
 
 A purely spatial dotcrawl remover that can be safely used on most material after field matching.
 
-iterations: The number of times to apply the internal filter. Usally a number between 1 and 4 will have the best results and using too high values may cause artifacting.
+Takes constant format YUV420P8 or GRAY8 input and must be at least 6x6 pixels. Only the luma plane is processed and its output is clamped to the 16-235 range.
 
-usematch: If true then matching hints from VFM are used when processing. This may or may not have a positive effect.
+iterations: The number of times to apply the internal filter. Usally a number between 1 and 4 will have the best results and using too high values may cause artifacting. Values outside the 1-10 range are clamped.
 
 DotKillZ
 --------
@@ -26,22 +26,26 @@ A pseudo-spatial dotcrawl and rainbow remover. It only works on NTSC content wit
 
 Note that due to its nature only every other final frame will have dotcrawl and rainbows removed. Typically never artifacts if all requirements are met.
 
+Takes constant format YUV420P8 input.
+
 order: Field order. Usually 0, note that 1 hasn't been tested due to a lack of test material.
 
-offset: The cycle offset for the pulldown pattern. A number between 0 and 4. Can only be determined by trial and error.
+offset: The cycle offset for the pulldown pattern. A number between 0 and 4, other values are an error. Can only be determined by trial and error.
 
 DotKillT
 --------
 
 dotkill.DotKillT(clip clip[, int order=0, int offset=0, int dupthresh=64, int tratio=3, bint show=False])
 
-A full spatioi-temporal dotcrawl and rainbow remover. It only works on NTSC content with rainbows added after 3:2 pulldown. This is true most of the time for anime.
+A full spatio-temporal dotcrawl and rainbow remover. It only works on NTSC content with rainbows added after 3:2 pulldown. This is true most of the time for anime.
 
 May produce extreme artifacting if dupthresh is set too high.
 
+Takes constant format YUV420P8 input.
+
 order: Field order. Usually 0, note that 1 hasn't been tested due to a lack of test material.
 
-offset: The cycle offset for the pulldown pattern. A number between 0 and 4. Can only be determined by trial and error.
+offset: The cycle offset for the pulldown pattern. A number between 0 and 4, other values are an error. Can only be determined by trial and error.
 
 dupthresh: The threshold for determining if a block has changed between fields. Depending on the source material 32-128 are usually reasonable values. A value of 0 makes the function identical to DotKillZ.
 

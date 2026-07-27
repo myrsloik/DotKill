@@ -39,7 +39,7 @@ jobs:
 
     - uses: actions/upload-artifact@v7
       with:
-        name: descratch-${{ matrix.arch }}
+        name: dotkill-${{ matrix.arch }}
         path: dist
 
   build-windows-wheel:
@@ -75,12 +75,12 @@ jobs:
 
     - uses: actions/upload-artifact@v7
       with:
-        name: descratch-sdist
+        name: dotkill-sdist
         path: dist/*.tar.gz
 
     - uses: actions/upload-artifact@v7
       with:
-        name: descratch-win_amd64
+        name: dotkill-win_amd64
         path: dist/*.whl
 
   publish:

@@ -3,19 +3,21 @@ project('DotKill', 'cpp',
     license: 'MIT',
     license_files: 'LICENSE',
     meson_version: '>=1.2.3',
-    version: '3.0',
+    version: '4.0',
 )
 
+py = import('python').find_installation(pure: false)
+
+# query the same interpreter that provides the install dir below, otherwise a
+# PATH lookup can pick an installation without the VapourSynth build dependency
 incdir = include_directories(
     run_command(
-        find_program('python', 'python3'),
+        py,
         '-c',
         'import vapoursynth as vs; print(vs.get_include())',
         check: true,
     ).stdout().strip(),
 )
-
-py = import('python').find_installation(pure: false)
 
 shared_module('dotkill',
     files('src/dotkill1.cpp'),

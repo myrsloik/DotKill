@@ -2,7 +2,9 @@
 #include "VSHelper4.h"
 #include <algorithm>
 #include <memory>
+#include <cstdint>
 #include <cstdlib>
+#include <cstring>
 #include <vector>
 
 ////////////////////////////////////////
@@ -32,13 +34,13 @@ static void convHoriz(const uint8_t *src, ptrdiff_t srcStride, int16_t *dst, int
         src += srcStride;
         dst += width;
     }
-    memset(dst, 0, sizeof(int16_t) * width);
+    std::memset(dst, 0, sizeof(int16_t) * width);
 }
 
 static void convVert(const uint8_t *src, ptrdiff_t srcStride, int16_t *dst, int width, int height) {
     height -= 5;
 
-    memset(dst, 0, sizeof(int16_t) * width * 2);
+    std::memset(dst, 0, sizeof(int16_t) * width * 2);
     src += 2 * srcStride;
     dst += 2 * width;
 
@@ -55,12 +57,11 @@ static void convVert(const uint8_t *src, ptrdiff_t srcStride, int16_t *dst, int 
         dst += width;
     }
 
-    memset(dst, 0, sizeof(int16_t) * width * 3);
+    std::memset(dst, 0, sizeof(int16_t) * width * 3);
 }
 
-static void applyMask(const int16_t *maskPtr, uint8_t *dst, ptrdiff_t dstStride, int width, int height, uint8_t *ppMask) {
+static void applyMask(const int16_t *maskPtr, uint8_t *dst, ptrdiff_t dstStride, int width, int height) {
     maskPtr += width;
-    ppMask += width;
     dst += dstStride;
 
     int16_t sortArray[8];
@@ -89,8 +90,6 @@ static void applyMask(const int16_t *maskPtr, uint8_t *dst, ptrdiff_t dstStride,
                 t = (t - 4) / 8;
 
             if (std::abs(t) > 1) {
-                ppMask[x] = 255;
-
                 dst[x] = static_cast<uint8_t>(std::clamp(dst[x] - t, 16, 235));
                 dst[x + 1] = static_cast<uint8_t>(std::clamp(dst[x + 1] - t, 16, 235));
                 dst[x + dstStride] = static_cast<uint8_t>(std::clamp(dst[x + dstStride] - t, 16, 235));
@@ -99,7 +98,6 @@ static void applyMask(const int16_t *maskPtr, uint8_t *dst, ptrdiff_t dstStride,
         }
 
         maskPtr += width;
-        ppMask += width;
         dst += dstStride;
     }
 }
@@ -118,20 +116,15 @@ static const VSFrame *VS_CC dotKillSGetFrame(int n, int activationReason, void *
         ptrdiff_t dstStride = vsapi->getStride(outframe, 0);
         uint8_t *dstPtr = vsapi->getWritePtr(outframe, 0);
 
-        int16_t *tempMask = new int16_t[width * height];
-        uint8_t *ppMask = new uint8_t[width * height]();
+        std::vector<int16_t> tempMask(static_cast<size_t>(width) * height);
 
         for (int i = 0; i < d->iterations; i++) {
-            convVert(dstPtr, dstStride, tempMask, width, height);
-            applyMask(tempMask, dstPtr, dstStride, width, height, ppMask);
+            convVert(dstPtr, dstStride, tempMask.data(), width, height);
+            applyMask(tempMask.data(), dstPtr, dstStride, width, height);
 
-            convHoriz(dstPtr, dstStride, tempMask, width, height);
-            applyMask(tempMask, dstPtr, dstStride, width, height, ppMask);
-
+            convHoriz(dstPtr, dstStride, tempMask.data(), width, height);
+            applyMask(tempMask.data(), dstPtr, dstStride, width, height);
         }
-
-        delete[] tempMask;
-        delete[] ppMask;
 
         return outframe;
     }
@@ -139,23 +132,29 @@ static const VSFrame *VS_CC dotKillSGetFrame(int n, int activationReason, void *
     return nullptr;
 }
 
-static void VS_CC dotKillSFree(void *instanceData, VSCore *core, const VSAPI *vsapi) {
+static void VS_CC dotKillSFree(void *instanceData, VSCore *, const VSAPI *vsapi) {
     DotKillSData *d = reinterpret_cast<DotKillSData*>(instanceData);
     vsapi->freeNode(d->node);
     delete d;
 }
 
-static void VS_CC dotKillSCreate(const VSMap *in, VSMap *out, void *userData, VSCore *core, const VSAPI *vsapi) {
+static void VS_CC dotKillSCreate(const VSMap *in, VSMap *out, void *, VSCore *core, const VSAPI *vsapi) {
     std::unique_ptr<DotKillSData> d(new DotKillSData());
 
     int err;
     d->node = vsapi->mapGetNode(in, "clip", 0, nullptr);
     d->vi = vsapi->getVideoInfo(d->node);
-    d->iterations = vsapi->mapGetIntSaturated(in, "iterations", 0, &err);
-    if (d->iterations < 1)
-        d->iterations = 1;
+    d->iterations = std::clamp(vsapi->mapGetIntSaturated(in, "iterations", 0, &err), 1, 10);
     if ((!vsh::isSameVideoPresetFormat(pfYUV420P8, &d->vi->format, core, vsapi) && !vsh::isSameVideoPresetFormat(pfGray8, &d->vi->format, core, vsapi)) || !vsh::isConstantVideoFormat(d->vi)) {
         vsapi->mapSetError(out, "DotKillS: only constant dimension YUV420P8 and GRAY8 supported");
+        vsapi->freeNode(d->node);
+        return;
+    }
+
+    // convHoriz taps x-2..x+3 and convVert taps 3 rows in both directions, so
+    // anything smaller than the kernel support underflows the temporary buffer
+    if (d->vi->width < 6 || d->vi->height < 6) {
+        vsapi->mapSetError(out, "DotKillS: clip dimensions must be at least 6x6");
         vsapi->freeNode(d->node);
         return;
     }
@@ -169,49 +168,53 @@ static void VS_CC dotKillSCreate(const VSMap *in, VSMap *out, void *userData, VS
 // DotKillZ
 
 
-static void applyFieldBlend(const VSFrame *srcc, const VSFrame *srcn, VSFrame *outframe, int order, VSCore *core, const VSAPI *vsapi) {
+static void applyFieldBlend(const VSFrame *srcc, const VSFrame *srcn, VSFrame *outframe, int order, const VSAPI *vsapi) {
     const VSVideoFormat *fi = vsapi->getVideoFrameFormat(srcc);
     for (int plane = 0; plane < fi->numPlanes; plane++) {
         int width = vsapi->getFrameWidth(srcc, plane);
         int height = vsapi->getFrameHeight(srcc, plane);
 
-        ptrdiff_t stride = vsapi->getStride(outframe, plane);
+        ptrdiff_t dstStride = vsapi->getStride(outframe, plane);
+        ptrdiff_t srccStride = vsapi->getStride(srcc, plane);
+        ptrdiff_t srcnStride = vsapi->getStride(srcn, plane);
         uint8_t *dstp = vsapi->getWritePtr(outframe, plane);
         const uint8_t *srccp = vsapi->getReadPtr(srcc, plane);
         const uint8_t *srcnp = vsapi->getReadPtr(srcn, plane);
 
         if (order) {
-            srccp += stride;
-            srcnp += stride;
-            dstp += stride;
+            srccp += srccStride;
+            srcnp += srcnStride;
+            dstp += dstStride;
         }
 
         for (int h = order; h < height; h += 2) {
             for (int w = 0; w < width; w++)
                 dstp[w] = (srccp[w] + srcnp[w] + 1) / 2;
 
-            srccp += 2 * stride;
-            srcnp += 2 * stride;
-            dstp += 2 * stride;
+            srccp += 2 * srccStride;
+            srcnp += 2 * srcnStride;
+            dstp += 2 * dstStride;
         }
     }
 }
 
-static void applyDotcrawInverse(const VSFrame *srcc, const VSFrame *srcn, VSFrame *outframe, int order, VSCore *core, const VSAPI *vsapi) {
+static void applyDotcrawInverse(const VSFrame *srcc, const VSFrame *srcn, VSFrame *outframe, int order, const VSAPI *vsapi) {
     const VSVideoFormat *fi = vsapi->getVideoFrameFormat(srcc);
     for (int plane = 0; plane < fi->numPlanes; plane++) {
         int width = vsapi->getFrameWidth(srcc, plane);
         int height = vsapi->getFrameHeight(srcc, plane);
 
-        ptrdiff_t stride = vsapi->getStride(outframe, plane);
+        ptrdiff_t dstStride = vsapi->getStride(outframe, plane);
+        ptrdiff_t srccStride = vsapi->getStride(srcc, plane);
+        ptrdiff_t srcnStride = vsapi->getStride(srcn, plane);
         uint8_t *dstp = vsapi->getWritePtr(outframe, plane);
         const uint8_t *srccp = vsapi->getReadPtr(srcc, plane);
         const uint8_t *srcnp = vsapi->getReadPtr(srcn, plane);
 
         if (order) {
-            srccp += stride;
-            srcnp += stride;
-            dstp += stride;
+            srccp += srccStride;
+            srcnp += srcnStride;
+            dstp += dstStride;
         }
 
         for (int h = order; h < height; h += 2) {
@@ -219,20 +222,20 @@ static void applyDotcrawInverse(const VSFrame *srcc, const VSFrame *srcn, VSFram
                 dstp[w] = (srccp[w] + srcnp[w] + 1) / 2;
 
                 if (h > 1) {
-                    uint8_t l0val = dstp[w - 2 * stride];
+                    uint8_t l0val = dstp[w - 2 * dstStride];
                     uint8_t l2val = dstp[w];
-                    int l0diff = dstp[w - 2 * stride] - srccp[w - 2 * stride];
+                    int l0diff = dstp[w - 2 * dstStride] - srccp[w - 2 * srccStride];
                     int l2diff = dstp[w] - srccp[w];
                     if (plane == 0)
-                        dstp[w - stride] = std::clamp(srccp[w - stride] + (order ? l0diff : l2diff), 16, 235);
+                        dstp[w - dstStride] = std::clamp(srccp[w - srccStride] + (order ? l0diff : l2diff), 16, 235);
                     else
-                        dstp[w - stride] = (l0val + l2val + 1) / 2; // simply use some kind of interpolation and discard one field?
+                        dstp[w - dstStride] = (l0val + l2val + 1) / 2; // simply use some kind of interpolation and discard one field?
                 }
             }
 
-            srccp += 2 * stride;
-            srcnp += 2 * stride;
-            dstp += 2 * stride;
+            srccp += 2 * srccStride;
+            srcnp += 2 * srcnStride;
+            dstp += 2 * dstStride;
         }
     }
 }
@@ -244,7 +247,7 @@ typedef struct {
     int offset;
 } DotKillZData;
 
-static const VSFrame *VS_CC dotKillZGetFrame(int n, int activationReason, void *instanceData, void **frameData, VSFrameContext *frameCtx, VSCore *core, const VSAPI *vsapi) {
+static const VSFrame *VS_CC dotKillZGetFrame(int n, int activationReason, void *instanceData, void **, VSFrameContext *frameCtx, VSCore *core, const VSAPI *vsapi) {
     DotKillZData *d = reinterpret_cast<DotKillZData*>(instanceData);
 
     if (activationReason == arInitial) {
@@ -266,16 +269,16 @@ static const VSFrame *VS_CC dotKillZGetFrame(int n, int activationReason, void *
         VSFrame *outframe = vsapi->copyFrame(srcc, core);
         if ((n + d->offset) % 5 == 0) {
             // current and next field are duplicates, complement field is from the same frame so do dotcrawl inverse on that as well
-            applyDotcrawInverse(srcc, srcn, outframe, d->order, core, vsapi);
+            applyDotcrawInverse(srcc, srcn, outframe, d->order, vsapi);
         } else if ((n + d->offset) % 5 == 1) {
             // current and previous field are duplicates so blend them together
-            applyFieldBlend(srcc, srcp, outframe, d->order, core, vsapi);
+            applyFieldBlend(srcc, srcp, outframe, d->order, vsapi);
         } else if ((n + d->offset) % 5 == 2) {
             // current and next complement field are duplicates so blend them together
-            applyFieldBlend(srcc, srcn, outframe, !d->order, core, vsapi);
+            applyFieldBlend(srcc, srcn, outframe, !d->order, vsapi);
         } else if ((n + d->offset) % 5 == 3) {
             // current and previous field are duplicates, complement field is from the same frame so do dotcrawl inverse on that as well
-            applyDotcrawInverse(srcc, srcp, outframe, !d->order, core, vsapi);
+            applyDotcrawInverse(srcc, srcp, outframe, !d->order, vsapi);
         }
 
         vsapi->freeFrame(srcp);
@@ -288,13 +291,13 @@ static const VSFrame *VS_CC dotKillZGetFrame(int n, int activationReason, void *
     return nullptr;
 }
 
-static void VS_CC dotKillZFree(void *instanceData, VSCore *core, const VSAPI *vsapi) {
+static void VS_CC dotKillZFree(void *instanceData, VSCore *, const VSAPI *vsapi) {
     DotKillZData *d = reinterpret_cast<DotKillZData*>(instanceData);
     vsapi->freeNode(d->node);
     delete d;
 }
 
-static void VS_CC dotKillZCreate(const VSMap *in, VSMap *out, void *userData, VSCore *core, const VSAPI *vsapi) {
+static void VS_CC dotKillZCreate(const VSMap *in, VSMap *out, void *, VSCore *core, const VSAPI *vsapi) {
     std::unique_ptr<DotKillZData> d(new DotKillZData());
 
     int err;
@@ -309,8 +312,14 @@ static void VS_CC dotKillZCreate(const VSMap *in, VSMap *out, void *userData, VS
         return;
     }
 
+    if (d->offset < 0 || d->offset > 4) {
+        vsapi->mapSetError(out, "DotKillZ: offset must be between 0 and 4");
+        vsapi->freeNode(d->node);
+        return;
+    }
+
     VSFilterDependency deps[] = { {d->node, rpGeneral} };
-    vsapi->createVideoFilter(out, "DotKillZ", d->vi, dotKillZGetFrame, dotKillZFree, fmParallelRequests, deps, 1, d.get(), core);
+    vsapi->createVideoFilter(out, "DotKillZ", d->vi, dotKillZGetFrame, dotKillZFree, fmParallel, deps, 1, d.get(), core);
     d.release();
 }
 
@@ -320,7 +329,7 @@ static void VS_CC dotKillZCreate(const VSMap *in, VSMap *out, void *userData, VS
 constexpr int blockx = 16;
 constexpr int blocky = 8;
 
-static void calcDiffMetric(const VSFrame *f1, const VSFrame *f2, int64_t *bdiffs, int nxblocks, int nyblocks,int field, const VSAPI *vsapi) {
+static void calcDiffMetric(const VSFrame *f1, const VSFrame *f2, int64_t *bdiffs, int nxblocks, int field, const VSAPI *vsapi) {
     for (int plane = 0; plane < 3; plane++) {
         ptrdiff_t stride = vsapi->getStride(f1, plane);
         const uint8_t *f1p = vsapi->getReadPtr(f1, plane);
@@ -363,22 +372,22 @@ static void calcDiffMetric(const VSFrame *f1, const VSFrame *f2, int64_t *bdiffs
     }
 }
 
-static int64_t getMaxDiff(int i, int j, const int64_t *bdiffs1, int nxblocks, int nyblocks) {
+static int64_t getMaxDiff(int i, int j, const int64_t *bdiffs1, int nxblocks) {
     int64_t tmp1 = bdiffs1[i * nxblocks + j] + bdiffs1[i * nxblocks + j + 1] + bdiffs1[(i + 1) * nxblocks + j] + bdiffs1[(i + 1) * nxblocks + j + 1];
     int64_t tmp2 = bdiffs1[i * nxblocks + j] + bdiffs1[i * nxblocks + j - 1] + bdiffs1[(i + 1) * nxblocks + j] + bdiffs1[(i + 1) * nxblocks + j - 1];
-    int64_t tmp3 = bdiffs1[i * nxblocks + j] + bdiffs1[i * nxblocks - j + 1] + bdiffs1[(i - 1) * nxblocks + j] + bdiffs1[(i - 1) * nxblocks + j + 1];
-    int64_t tmp4 = bdiffs1[i * nxblocks + j] + bdiffs1[i * nxblocks - j - 1] + bdiffs1[(i - 1) * nxblocks + j] + bdiffs1[(i - 1) * nxblocks + j - 1];
+    int64_t tmp3 = bdiffs1[i * nxblocks + j] + bdiffs1[i * nxblocks + j + 1] + bdiffs1[(i - 1) * nxblocks + j] + bdiffs1[(i - 1) * nxblocks + j + 1];
+    int64_t tmp4 = bdiffs1[i * nxblocks + j] + bdiffs1[i * nxblocks + j - 1] + bdiffs1[(i - 1) * nxblocks + j] + bdiffs1[(i - 1) * nxblocks + j - 1];
     return std::max({ tmp1, tmp2, tmp3, tmp4 });
 }
 
-static void diffMetricToMask(uint8_t *mask, const int64_t *bdiffs1, const int64_t *bdiffs2, int nxblocks, int nyblocks, int dupthresh, int tratio, const VSAPI *vsapi) {
+static void diffMetricToMask(uint8_t *mask, const int64_t *bdiffs1, const int64_t *bdiffs2, int nxblocks, int nyblocks, int64_t dupthresh, int tratio) {
     int totdiff1 = 0;
     int totdiff2 = 0;
 
     for (int i = 1; i < nyblocks - 1; i++) {
         for (int j = 1; j < nxblocks - 1; j++) {
-            int64_t diff1 = getMaxDiff(i, j, bdiffs1, nxblocks, nyblocks);
-            int64_t diff2 = getMaxDiff(i, j, bdiffs2, nxblocks, nyblocks);
+            int64_t diff1 = getMaxDiff(i, j, bdiffs1, nxblocks);
+            int64_t diff2 = getMaxDiff(i, j, bdiffs2, nxblocks);
 
             if (diff1 >= dupthresh)
                 totdiff1++;
@@ -393,8 +402,8 @@ static void diffMetricToMask(uint8_t *mask, const int64_t *bdiffs1, const int64_
 
     for (int i = 1; i < nyblocks - 1; i++) {
         for (int j = 1; j < nxblocks - 1; j++) {
-            int64_t diff1 = getMaxDiff(i, j, bdiffs1, nxblocks, nyblocks);
-            int64_t diff2 = getMaxDiff(i, j, bdiffs2, nxblocks, nyblocks);
+            int64_t diff1 = getMaxDiff(i, j, bdiffs1, nxblocks);
+            int64_t diff2 = getMaxDiff(i, j, bdiffs2, nxblocks);
 
             if (!skip1 && diff1 <= diff2 && diff1 < dupthresh)
                 mask[nxblocks * i + j] = 1;
@@ -410,13 +419,16 @@ static void diffMetricToMask(uint8_t *mask, const int64_t *bdiffs1, const int64_
     }
 
     // extend mask to top and bottom
-    memcpy(mask, mask + nxblocks, nxblocks);
-    memcpy(mask + nxblocks * (nyblocks - 1), mask + nxblocks * (nyblocks - 2), nxblocks);
+    std::memcpy(mask, mask + nxblocks, nxblocks);
+    std::memcpy(mask + nxblocks * (nyblocks - 1), mask + nxblocks * (nyblocks - 2), nxblocks);
 }
 
-static void applyTemporalMask(VSFrame *dst, const VSFrame *f0, const VSFrame *f1, const VSFrame *f2, uint8_t *mask, int nxblocks, int nyblocks, int field, bool show, const VSAPI *vsapi) {
+static void applyTemporalMask(VSFrame *dst, const VSFrame *f0, const VSFrame *f1, const VSFrame *f2, const uint8_t *mask, int nxblocks, int field, bool show, const VSAPI *vsapi) {
     for (int plane = 0; plane < 3; plane++) {
-        ptrdiff_t stride = vsapi->getStride(f1, plane);
+        ptrdiff_t dstStride = vsapi->getStride(dst, plane);
+        ptrdiff_t f0Stride = vsapi->getStride(f0, plane);
+        ptrdiff_t f1Stride = vsapi->getStride(f1, plane);
+        ptrdiff_t f2Stride = vsapi->getStride(f2, plane);
         const uint8_t *f0p = vsapi->getReadPtr(f0, plane);
         const uint8_t *f1p = vsapi->getReadPtr(f1, plane);
         const uint8_t *f2p = vsapi->getReadPtr(f2, plane);
@@ -424,10 +436,10 @@ static void applyTemporalMask(VSFrame *dst, const VSFrame *f0, const VSFrame *f1
         const VSVideoFormat *fi = vsapi->getVideoFrameFormat(f1);
 
         if (field) {
-            f0p += stride;
-            f1p += stride;
-            f2p += stride;
-            dstp += stride;
+            f0p += f0Stride;
+            f1p += f1Stride;
+            f2p += f2Stride;
+            dstp += dstStride;
         }
 
         int width = vsapi->getFrameWidth(f1, plane);
@@ -452,16 +464,14 @@ static void applyTemporalMask(VSFrame *dst, const VSFrame *f0, const VSFrame *f1
                         dstp[xl] = ((f1p[xl] + f0p[xl] + 1) / 2);
                     else if (mask[ydest * nxblocks + xdest] == 2)
                         dstp[xl] = ((f2p[xl] + f0p[xl] + 1) / 2);
-                    else
-                        dstp[xl] = dstp[xl];
                 }
                 xdest++;
             }
 
-            f0p += stride * 2;
-            f1p += stride * 2;
-            f2p += stride * 2;
-            dstp += stride * 2;
+            f0p += f0Stride * 2;
+            f1p += f1Stride * 2;
+            f2p += f2Stride * 2;
+            dstp += dstStride * 2;
         }
     }
 
@@ -481,15 +491,7 @@ static void applyTemporalMask(VSFrame *dst, const VSFrame *f0, const VSFrame *f1
             for (int x = 0; x < width; x += hblockx) {
                 int m = std::min(width, x + hblockx);
 
-                if (y % blocky == 0) {
-                    for (int xl = x; xl < m; xl++) {
-                        if (mask[ydest * nxblocks + xdest] == 1) {
-                            dstp[xl] = 0;
-                        } else if (mask[ydest * nxblocks + xdest] == 2) {
-                            dstp[xl] = 255;
-                        }
-                    }
-                } else if (y % blocky == blocky - 1) {
+                if (y % blocky == 0 || y % blocky == blocky - 1) {
                     for (int xl = x; xl < m; xl++) {
                         if (mask[ydest * nxblocks + xdest] == 1) {
                             dstp[xl] = 0;
@@ -520,7 +522,7 @@ typedef struct {
     const VSVideoInfo *vi;
     int order;
     int offset;
-    int dupthresh;
+    int64_t dupthresh;
     int tratio;
     bool show;
 } DotKillTData;
@@ -528,8 +530,9 @@ typedef struct {
 static const VSFrame *VS_CC dotKillTGetFrame(int n, int activationReason, void *instanceData, void **frameData, VSFrameContext *frameCtx, VSCore *core, const VSAPI *vsapi) {
     DotKillTData *d = reinterpret_cast<DotKillTData*>(instanceData);
 
+    // a block covers blockx/2 columns and blocky frame rows, the latter being blocky/2 rows of a single field
     int nxblocks = (d->vi->width + blockx / 2 - 1) / (blockx / 2);
-    int nyblocks = (d->vi->height + blocky / 2 - 1) / (blocky / 2);
+    int nyblocks = (d->vi->height + blocky - 1) / blocky;
 
     if (activationReason == arInitial) {
         vsapi->requestFrameFilter(std::max(n - 2, 0), d->node, frameCtx);
@@ -567,72 +570,72 @@ static const VSFrame *VS_CC dotKillTGetFrame(int n, int activationReason, void *
 
         if ((n + d->offset) % 5 == 0) {
             // 1
-            applyDotcrawInverse(srcc, srcn, outframe, d->order, core, vsapi);
+            applyDotcrawInverse(srcc, srcn, outframe, d->order, vsapi);
 
             // 2
             std::vector<int64_t> maskprev1(nxblocks * nyblocks);
             std::vector<int64_t> masknext1(nxblocks * nyblocks);
             std::vector<uint8_t> mask(nxblocks * nyblocks);
-            calcDiffMetric(srcp, srcn, maskprev1.data(), nxblocks, nyblocks, d->order, vsapi);
-            calcDiffMetric(srcc, srcnn, masknext1.data(), nxblocks, nyblocks, d->order, vsapi);
+            calcDiffMetric(srcp, srcn, maskprev1.data(), nxblocks, d->order, vsapi);
+            calcDiffMetric(srcc, srcnn, masknext1.data(), nxblocks, d->order, vsapi);
 
-            diffMetricToMask(mask.data(), maskprev1.data(), masknext1.data(), nxblocks, nyblocks, d->dupthresh, d->tratio, vsapi);
+            diffMetricToMask(mask.data(), maskprev1.data(), masknext1.data(), nxblocks, nyblocks, d->dupthresh, d->tratio);
 
-            applyTemporalMask(outframe, srcc, srcp, srcn, mask.data(), nxblocks, nyblocks, !d->order, d->show, vsapi);
+            applyTemporalMask(outframe, srcc, srcp, srcn, mask.data(), nxblocks, !d->order, d->show, vsapi);
         } else if ((n + d->offset) % 5 == 1) {
             // 1
-            applyFieldBlend(srcc, srcp, outframe, d->order, core, vsapi);
+            applyFieldBlend(srcc, srcp, outframe, d->order, vsapi);
 
             // 2
             std::vector<int64_t> maskprev1(nxblocks * nyblocks);
             std::vector<int64_t> masknext1(nxblocks * nyblocks);
             std::vector<uint8_t> mask(nxblocks * nyblocks);
-            calcDiffMetric(srcp, srcn, maskprev1.data(), nxblocks, nyblocks, d->order, vsapi);
-            calcDiffMetric(srcc, srcnn, masknext1.data(), nxblocks, nyblocks, !d->order, vsapi);
+            calcDiffMetric(srcp, srcn, maskprev1.data(), nxblocks, d->order, vsapi);
+            calcDiffMetric(srcc, srcnn, masknext1.data(), nxblocks, !d->order, vsapi);
 
-            diffMetricToMask(mask.data(), maskprev1.data(), masknext1.data(), nxblocks, nyblocks, d->dupthresh, d->tratio, vsapi);
+            diffMetricToMask(mask.data(), maskprev1.data(), masknext1.data(), nxblocks, nyblocks, d->dupthresh, d->tratio);
 
-            applyTemporalMask(outframe, srcc, srcp, srcn, mask.data(), nxblocks, nyblocks, !d->order, d->show, vsapi);
+            applyTemporalMask(outframe, srcc, srcp, srcn, mask.data(), nxblocks, !d->order, d->show, vsapi);
         } else if ((n + d->offset) % 5 == 2) {
             // 1
             std::vector<int64_t> maskprev1(nxblocks * nyblocks);
             std::vector<int64_t> masknext1(nxblocks * nyblocks);
             std::vector<uint8_t> mask(nxblocks * nyblocks);
-            calcDiffMetric(srcc, srcpp, maskprev1.data(), nxblocks, nyblocks, d->order, vsapi);
-            calcDiffMetric(srcp, srcn, masknext1.data(), nxblocks, nyblocks, !d->order, vsapi);
+            calcDiffMetric(srcc, srcpp, maskprev1.data(), nxblocks, d->order, vsapi);
+            calcDiffMetric(srcp, srcn, masknext1.data(), nxblocks, !d->order, vsapi);
 
-            diffMetricToMask(mask.data(), maskprev1.data(), masknext1.data(), nxblocks, nyblocks, d->dupthresh, d->tratio, vsapi);
+            diffMetricToMask(mask.data(), maskprev1.data(), masknext1.data(), nxblocks, nyblocks, d->dupthresh, d->tratio);
 
-            applyTemporalMask(outframe, srcc, srcp, srcn, mask.data(), nxblocks, nyblocks, d->order, d->show, vsapi);
+            applyTemporalMask(outframe, srcc, srcp, srcn, mask.data(), nxblocks, d->order, d->show, vsapi);
 
             // 2
-            applyFieldBlend(srcc, srcn, outframe, !d->order, core, vsapi);
+            applyFieldBlend(srcc, srcn, outframe, !d->order, vsapi);
         } else if ((n + d->offset) % 5 == 3) {
             // 2
-            applyDotcrawInverse(srcc, srcp, outframe, !d->order, core, vsapi);
+            applyDotcrawInverse(srcc, srcp, outframe, !d->order, vsapi);
 
             // 1
             std::vector<int64_t> maskprev1(nxblocks * nyblocks);
             std::vector<int64_t> masknext1(nxblocks * nyblocks);
             std::vector<uint8_t> mask(nxblocks * nyblocks);
-            calcDiffMetric(srcc, srcpp, maskprev1.data(), nxblocks, nyblocks, !d->order, vsapi);
-            calcDiffMetric(srcp, srcn, masknext1.data(), nxblocks, nyblocks, !d->order, vsapi);
+            calcDiffMetric(srcc, srcpp, maskprev1.data(), nxblocks, !d->order, vsapi);
+            calcDiffMetric(srcp, srcn, masknext1.data(), nxblocks, !d->order, vsapi);
 
-            diffMetricToMask(mask.data(), maskprev1.data(), masknext1.data(), nxblocks, nyblocks, d->dupthresh, d->tratio, vsapi);
+            diffMetricToMask(mask.data(), maskprev1.data(), masknext1.data(), nxblocks, nyblocks, d->dupthresh, d->tratio);
 
-            applyTemporalMask(outframe, srcc, srcp, srcn, mask.data(), nxblocks, nyblocks, d->order, d->show, vsapi);
+            applyTemporalMask(outframe, srcc, srcp, srcn, mask.data(), nxblocks, d->order, d->show, vsapi);
         } else if ((n + d->offset) % 5 == 4) {
             // 1
             {
                 std::vector<int64_t> maskprev1(nxblocks * nyblocks);
                 std::vector<int64_t> masknext1(nxblocks * nyblocks);
                 std::vector<uint8_t> mask(nxblocks * nyblocks);
-                calcDiffMetric(srcc, srcpp, maskprev1.data(), nxblocks, nyblocks, !d->order, vsapi);
-                calcDiffMetric(srcc, srcnn, masknext1.data(), nxblocks, nyblocks, d->order, vsapi);
+                calcDiffMetric(srcc, srcpp, maskprev1.data(), nxblocks, !d->order, vsapi);
+                calcDiffMetric(srcc, srcnn, masknext1.data(), nxblocks, d->order, vsapi);
 
-                diffMetricToMask(mask.data(), maskprev1.data(), masknext1.data(), nxblocks, nyblocks, d->dupthresh, d->tratio, vsapi);
+                diffMetricToMask(mask.data(), maskprev1.data(), masknext1.data(), nxblocks, nyblocks, d->dupthresh, d->tratio);
 
-                applyTemporalMask(outframe, srcc, srcp, srcn, mask.data(), nxblocks, nyblocks, d->order, d->show, vsapi);
+                applyTemporalMask(outframe, srcc, srcp, srcn, mask.data(), nxblocks, d->order, d->show, vsapi);
             }
 
             // 2
@@ -640,12 +643,12 @@ static const VSFrame *VS_CC dotKillTGetFrame(int n, int activationReason, void *
                 std::vector<int64_t> maskprev1(nxblocks * nyblocks);
                 std::vector<int64_t> masknext1(nxblocks * nyblocks);
                 std::vector<uint8_t> mask(nxblocks * nyblocks);
-                calcDiffMetric(srcpp, srcc, maskprev1.data(), nxblocks, nyblocks, !d->order, vsapi);
-                calcDiffMetric(srcc, srcnn, masknext1.data(), nxblocks, nyblocks, d->order, vsapi);
+                calcDiffMetric(srcpp, srcc, maskprev1.data(), nxblocks, !d->order, vsapi);
+                calcDiffMetric(srcc, srcnn, masknext1.data(), nxblocks, d->order, vsapi);
 
-                diffMetricToMask(mask.data(), maskprev1.data(), masknext1.data(), nxblocks, nyblocks, d->dupthresh, d->tratio, vsapi);
+                diffMetricToMask(mask.data(), maskprev1.data(), masknext1.data(), nxblocks, nyblocks, d->dupthresh, d->tratio);
 
-                applyTemporalMask(outframe, srcc, srcp, srcn, mask.data(), nxblocks, nyblocks, !d->order, d->show, vsapi);
+                applyTemporalMask(outframe, srcc, srcp, srcn, mask.data(), nxblocks, !d->order, d->show, vsapi);
             }
         }
 
@@ -661,13 +664,13 @@ static const VSFrame *VS_CC dotKillTGetFrame(int n, int activationReason, void *
     return nullptr;
 }
 
-static void VS_CC dotKillTFree(void *instanceData, VSCore *core, const VSAPI *vsapi) {
+static void VS_CC dotKillTFree(void *instanceData, VSCore *, const VSAPI *vsapi) {
     DotKillTData *d = reinterpret_cast<DotKillTData*>(instanceData);
     vsapi->freeNode(d->node);
     delete d;
 }
 
-static void VS_CC dotKillTCreate(const VSMap *in, VSMap *out, void *userData, VSCore *core, const VSAPI *vsapi) {
+static void VS_CC dotKillTCreate(const VSMap *in, VSMap *out, void *, VSCore *core, const VSAPI *vsapi) {
     std::unique_ptr<DotKillTData> d(new DotKillTData());
 
     int err;
@@ -675,10 +678,11 @@ static void VS_CC dotKillTCreate(const VSMap *in, VSMap *out, void *userData, VS
     d->vi = vsapi->getVideoInfo(d->node);
     d->offset = vsapi->mapGetIntSaturated(in, "offset", 0, &err);
     d->order = !!vsapi->mapGetInt(in, "order", 0, &err);
-    d->dupthresh = vsapi->mapGetIntSaturated(in, "dupthresh", 0, &err);
-    if (err || d->dupthresh < 0)
-        d->dupthresh = 64;
-    d->dupthresh *= d->dupthresh;
+    int dupthresh = vsapi->mapGetIntSaturated(in, "dupthresh", 0, &err);
+    if (err || dupthresh < 0)
+        dupthresh = 64;
+    // widened before squaring since the metric it is compared against is 64 bit anyway
+    d->dupthresh = static_cast<int64_t>(dupthresh) * dupthresh;
     d->tratio = vsapi->mapGetIntSaturated(in, "tratio", 0, &err);
     if (err || d->tratio < 1)
         d->tratio = 3;
@@ -690,8 +694,21 @@ static void VS_CC dotKillTCreate(const VSMap *in, VSMap *out, void *userData, VS
         return;
     }
 
+    if (d->offset < 0 || d->offset > 4) {
+        vsapi->mapSetError(out, "DotKillT: offset must be between 0 and 4");
+        vsapi->freeNode(d->node);
+        return;
+    }
+
+    // diffMetricToMask needs at least one interior block plus a block of edge extension on every side
+    if (d->vi->width < 3 * (blockx / 2) || d->vi->height < 3 * blocky) {
+        vsapi->mapSetError(out, "DotKillT: clip dimensions must be at least 24x24");
+        vsapi->freeNode(d->node);
+        return;
+    }
+
     VSFilterDependency deps[] = { {d->node, rpGeneral} };
-    vsapi->createVideoFilter(out, "DotKillT", d->vi, dotKillTGetFrame, dotKillTFree, fmParallelRequests, deps, 1, d.get(), core);
+    vsapi->createVideoFilter(out, "DotKillT", d->vi, dotKillTGetFrame, dotKillTFree, fmParallel, deps, 1, d.get(), core);
     d.release();
 }
 
