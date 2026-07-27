@@ -25,12 +25,22 @@ static ptrdiff_t elementStride(const VSFrame *f, int plane, const VSAPI *vsapi) 
     return vsapi->getStride(f, plane) / static_cast<ptrdiff_t>(sizeof(T));
 }
 
-static bool isSupportedFormat(const VSVideoInfo *vi, bool allowGray, VSCore *core, const VSAPI *vsapi) {
+// Every integer depth from 8 to 16 is handled by the uint8_t and uint16_t
+// instantiations. VapourSynth also permits 17 to 32 bit integer, where
+// bytesPerSample becomes 4, so the upper bound here is what keeps the
+// bytesPerSample based dispatch in the getframe functions honest.
+static bool isSupportedFormat(const VSVideoInfo *vi, bool allowGray) {
     if (!vsh::isConstantVideoFormat(vi))
         return false;
-    if (vsh::isSameVideoPresetFormat(pfYUV420P8, &vi->format, core, vsapi) || vsh::isSameVideoPresetFormat(pfYUV420P16, &vi->format, core, vsapi))
-        return true;
-    return allowGray && (vsh::isSameVideoPresetFormat(pfGray8, &vi->format, core, vsapi) || vsh::isSameVideoPresetFormat(pfGray16, &vi->format, core, vsapi));
+
+    const VSVideoFormat &fi = vi->format;
+    if (fi.sampleType != stInteger || fi.bitsPerSample < 8 || fi.bitsPerSample > 16)
+        return false;
+
+    if (fi.colorFamily == cfYUV)
+        return fi.subSamplingW == 1 && fi.subSamplingH == 1;
+
+    return allowGray && fi.colorFamily == cfGray;
 }
 
 ////////////////////////////////////////
@@ -189,8 +199,8 @@ static void VS_CC dotKillSCreate(const VSMap *in, VSMap *out, [[maybe_unused]] v
     d->node = vsapi->mapGetNode(in, "clip", 0, nullptr);
     d->vi = vsapi->getVideoInfo(d->node);
     d->iterations = std::clamp(vsapi->mapGetIntSaturated(in, "iterations", 0, &err), 1, 10);
-    if (!isSupportedFormat(d->vi, true, core, vsapi)) {
-        vsapi->mapSetError(out, "DotKillS: only constant dimension YUV420P8, YUV420P16, GRAY8 and GRAY16 supported");
+    if (!isSupportedFormat(d->vi, true)) {
+        vsapi->mapSetError(out, "DotKillS: only constant dimension 8-16 bit integer YUV420 and GRAY supported");
         vsapi->freeNode(d->node);
         return;
     }
@@ -365,8 +375,8 @@ static void VS_CC dotKillZCreate(const VSMap *in, VSMap *out, [[maybe_unused]] v
     d->offset = vsapi->mapGetIntSaturated(in, "offset", 0, &err);
     d->order = !!vsapi->mapGetInt(in, "order", 0, &err);
 
-    if (!isSupportedFormat(d->vi, false, core, vsapi)) {
-        vsapi->mapSetError(out, "DotKillZ: only constant dimension YUV420P8 and YUV420P16 supported");
+    if (!isSupportedFormat(d->vi, false)) {
+        vsapi->mapSetError(out, "DotKillZ: only constant dimension 8-16 bit integer YUV420 supported");
         vsapi->freeNode(d->node);
         return;
     }
@@ -766,8 +776,8 @@ static void VS_CC dotKillTCreate(const VSMap *in, VSMap *out, [[maybe_unused]] v
         d->tratio = 3;
     d->show = !!vsapi->mapGetInt(in, "show", 0, &err);
 
-    if (!isSupportedFormat(d->vi, false, core, vsapi)) {
-        vsapi->mapSetError(out, "DotKillT: only constant dimension YUV420P8 and YUV420P16 supported");
+    if (!isSupportedFormat(d->vi, false)) {
+        vsapi->mapSetError(out, "DotKillT: only constant dimension 8-16 bit integer YUV420 supported");
         vsapi->freeNode(d->node);
         return;
     }
