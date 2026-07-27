@@ -53,7 +53,12 @@ dupthresh: The threshold for determining if a block has changed between fields. 
 
 tratio: If more than 1/tratio blocks have changed between fields then temporal filtering won't be considered in that direction. Higher values can make high motion sections less likely to artifact.
 
-show: Shows which blocks have been determined to contain no change between fields and therefore will be blended to reduce artifacts. White square means that it will blend with the next frame and black square the previous. The squares are drawn at full scale rather than in the TV range. 
+show: Shows which blocks have been determined to contain no change between fields and therefore will be blended to reduce artifacts. White square means that it will blend with the next frame and black square the previous. The squares are drawn at full scale rather than in the TV range. Note that cycle offset 4 filters both fields separately and draws the squares once per field, so the two sets of squares partially overwrite each other there.
+
+Output frame properties
+-----------------------
+
+DotKillTOffset: The cycle position the frame was processed as, meaning (n + offset) % 5. Useful for verifying that offset has been guessed correctly.
 
 Usage
 =====

@@ -14,8 +14,9 @@
 template<typename T>
 using mask_t = std::conditional_t<sizeof(T) == 1, int16_t, int32_t>;
 
-// Squared sample differences accumulated over one block row. Only 16 bit input can
-// exceed 32 bits, a single squared 16 bit difference already nearly fills it.
+// Squared sample differences accumulated over one block row. A single squared 16 bit
+// difference is already 65535*65535, which overflows int32_t on its own, while the 8
+// bit worst case of 8 taps times 255*255 stays comfortably inside it.
 template<typename T>
 using diff_t = std::conditional_t<sizeof(T) == 1, int, int64_t>;
 
@@ -37,6 +38,10 @@ static bool isSupportedFormat(const VSVideoInfo *vi, bool allowGray) {
     if (fi.sampleType != stInteger || fi.bitsPerSample < 8 || fi.bitsPerSample > 16)
         return false;
 
+    // Pinning the subsampling to 420 is load bearing beyond matching the algorithm:
+    // calcDiffMetric and applyTemporalMask derive the chroma block step by dividing
+    // blockx/2 and blocky/2 by the subsampling, and a wider ratio would round that
+    // step down to zero, turning the x loop into an endless one.
     if (fi.colorFamily == cfYUV)
         return fi.subSamplingW == 1 && fi.subSamplingH == 1;
 
@@ -467,9 +472,12 @@ static void diffMetricToMask(uint8_t *mask, const int64_t *bdiffs1, const int64_
         }
     }
 
-    // skip temporal processing if more than 1/tratio blocks have changed
-    bool skip1 = (totdiff1 * tratio > (nxblocks - 2) * (nyblocks - 2));
-    bool skip2 = (totdiff2 * tratio > (nxblocks - 2) * (nyblocks - 2));
+    // skip temporal processing if more than 1/tratio blocks have changed.
+    // widened because tratio has no upper bound while the interior block count
+    // reaches five figures, so the 32 bit product would overflow
+    int64_t interior = static_cast<int64_t>(nxblocks - 2) * (nyblocks - 2);
+    bool skip1 = (static_cast<int64_t>(totdiff1) * tratio > interior);
+    bool skip2 = (static_cast<int64_t>(totdiff2) * tratio > interior);
 
     for (int i = 1; i < nyblocks - 1; i++) {
         for (int j = 1; j < nxblocks - 1; j++) {
@@ -635,6 +643,12 @@ static void dotKillTProcess(VSFrame *outframe, const VSFrame *srcpp, const VSFra
 
         applyTemporalMask<T>(outframe, srcc, srcp, srcn, mask.data(), nxblocks, !d->order, d->show, shift, vsapi);
     } else if (pattern == 2) {
+        // 2
+        // done before the masking below even though it is the second field, because
+        // the two write disjoint fields from source frames only while the show
+        // overlay spans every row and has to be drawn last to survive
+        applyFieldBlend<T>(srcc, srcn, outframe, !d->order, vsapi);
+
         // 1
         std::vector<int64_t> maskprev1(nxblocks * nyblocks);
         std::vector<int64_t> masknext1(nxblocks * nyblocks);
@@ -645,9 +659,6 @@ static void dotKillTProcess(VSFrame *outframe, const VSFrame *srcpp, const VSFra
         diffMetricToMask(mask.data(), maskprev1.data(), masknext1.data(), nxblocks, nyblocks, d->dupthresh, d->tratio);
 
         applyTemporalMask<T>(outframe, srcc, srcp, srcn, mask.data(), nxblocks, d->order, d->show, shift, vsapi);
-
-        // 2
-        applyFieldBlend<T>(srcc, srcn, outframe, !d->order, vsapi);
     } else if (pattern == 3) {
         // 2
         applyDotcrawInverse<T>(srcc, srcp, outframe, !d->order, shift, vsapi);
